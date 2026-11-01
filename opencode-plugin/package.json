@@ -1,0 +1,5 @@
+{
+  "name": "fairshare",
+  "type": "module",
+  "main": "index.mjs"
+}
