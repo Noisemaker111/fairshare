@@ -222,12 +222,35 @@ func cmdExec(args []string) int {
 		}
 	}
 
+	limit := runCeiling
+	if deadline > 0 && deadline < limit {
+		limit = deadline
+	}
+	// A whole suite or check waits for a heavy-job slot (slot.go), for at most half its time.
+	var slot *heavySlot
+	if heavyRun(cmdText) {
+		cwd, _ := os.Getwd()
+		s, err := acquireSlot(cmdText, cwd, label, limit/2, func(m string) { out.Write([]byte(m + "\n")) })
+		if err != nil {
+			os.Stdout.WriteString(fmt.Sprintf("[fairshare] not started: %s within %s; the PC already runs %d whole suites or checks (%s). Run it with run_in_background, where it waits its turn, or narrow it to one test file or package.\n",
+				errBusy, (limit / 2).Round(time.Second), slotCount(), describeHolders(slotHolders())))
+			logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 124, "stopped": "no-slot", "waited_ms": (limit / 2).Milliseconds()})
+			return 124
+		}
+		defer s.Close()
+		limit -= s.Waited
+		slot = s
+	}
+
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fairshare exec:", err)
 		return 127
 	}
 	cmd := exec.Command(exe, argv...)
+	if slot != nil {
+		cmd.Env = append(os.Environ(), heldEnv+"=1")
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, pw, pw // no stdin: an agent command has no one to answer it
 	start := time.Now()
 	cpu0 := selfCPU()
@@ -264,10 +287,6 @@ func cmdExec(args []string) int {
 		exited <- code
 	}()
 
-	limit := runCeiling
-	if deadline > 0 && deadline < limit {
-		limit = deadline
-	}
 	// Every 5 s: what the command's threads are doing, its CPU (GetProcessTimes per process; one
 	// that exited keeps what it had at the last look) and its I/O, network included.
 	seen, seenTotal, self := map[uint32]float64{}, 0.0, windows.GetCurrentProcessId()
@@ -340,7 +359,7 @@ wait:
 		case code = <-exited:
 			break wait
 		case <-timer.C:
-			if limit == deadline {
+			if deadline > 0 && deadline < runCeiling {
 				stopped, stopNote = "deadline", fmt.Sprintf("stopped after %ds, before the agent's time limit", int(limit.Round(time.Second).Seconds()))
 			} else {
 				stopped, stopNote = "ceiling", fmt.Sprintf("stopped after %s: commands stop before 10 minutes. Narrow it (one package or test file), or run it in the background with its output in a log", limit.Round(time.Second))
@@ -404,6 +423,9 @@ wait:
 	}
 	if stopped != "" {
 		ev["stopped"] = stopped
+	}
+	if slot != nil && slot.Waited > 0 {
+		ev["waited_ms"] = slot.Waited.Milliseconds()
 	}
 	for state, n := range ticks {
 		ev[state+"_s"] = n * int(every.Seconds())

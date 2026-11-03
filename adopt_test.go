@@ -13,12 +13,16 @@ import (
 )
 
 // Two fake chats (cmd.exe stands in for the harness): one runs twice as many busy threads as the
-// PC has cores, the other 2. Without lanes the light chat gets about a third of what it asks for;
-// with them it must get most of it, and the heavy chat must show it was held back.
+// PC has cores, the other 2. Without lanes every thread gets the same CPU; with them each of the
+// light chat's threads must get far more than each of the heavy chat's, and the heavy chat must
+// show it was held back. Both run at idle priority, so other work on the PC slows both alike: the
+// check compares the two chats, never CPU against a fixed amount, which failed whenever other
+// chats were busy (2026-11-03).
 func TestLanesGiveALightChatItsShare(t *testing.T) {
 	h, l := laneRun2(t, true)
-	if got, want := l["cpu_ms"].(float64), 0.75*2*laneSecs*1000; got < want {
-		t.Errorf("light chat got %.0f ms CPU, want at least %.0f: %v", got, want, l)
+	// Measured 2026-11-03: 2.3-2.9x with lanes, 0.6-0.8x without.
+	if r := perThreadRatio(h, l); r < 1.6 {
+		t.Errorf("each light-chat thread got %.1fx the CPU of a heavy-chat thread, want at least 1.6x: %v", r, l)
 	}
 	if h["holds"].(float64) < 1 || h["held_ms"].(float64) < 2000 {
 		t.Errorf("heavy chat was not held back: %v", h)
@@ -34,8 +38,8 @@ func TestLanesGiveALightChatItsShare(t *testing.T) {
 // The same chats without holding back: the light chat must lose out, or the test above proves nothing.
 func TestWithoutBalanceALightChatLosesOut(t *testing.T) {
 	h, l := laneRun2(t, false)
-	if got, most := l["cpu_ms"].(float64), 0.6*2*laneSecs*1000; got > most {
-		t.Errorf("light chat got %.0f ms CPU without balance, so the PC was not contended (want under %.0f)", got, most)
+	if r := perThreadRatio(h, l); r > 1.2 {
+		t.Errorf("without balance each light-chat thread still got %.1fx a heavy-chat thread's CPU, so the PC was not contended (want under 1.2x)", r)
 	}
 	if h["holds"].(float64) != 0 {
 		t.Errorf("held back without --balance: %v", h)
@@ -126,6 +130,11 @@ func laneEvents(t *testing.T, file string) map[float64]map[string]any {
 
 const laneSecs = 7
 
+// perThreadRatio is the CPU one light-chat thread got over what one heavy-chat thread got.
+func perThreadRatio(heavy, light map[string]any) float64 {
+	return (light["cpu_ms"].(float64) / 2) / (heavy["cpu_ms"].(float64) / float64(2*runtime.NumCPU()))
+}
+
 func laneRun2(t *testing.T, balance bool) (heavyLane, lightLane map[string]any) {
 	bin := fairshareBin(t)
 	const secs = laneSecs
@@ -154,5 +163,10 @@ func laneRun2(t *testing.T, balance bool) (heavyLane, lightLane map[string]any) 
 		t.Fatalf("missing lane events: %v", lanes)
 	}
 	t.Logf("heavy: cpu %v ms, held %v ms; light: cpu %v ms of %d wanted", h["cpu_ms"], h["held_ms"], l["cpu_ms"], 2*secs*1000)
+	// Both chats run at idle priority, so a PC busy with other work gives them too little to
+	// compare (2026-11-03: 3 of 24 cores, while other chats ran tests). That is no answer either way.
+	if got, pc := h["cpu_ms"].(float64)+l["cpu_ms"].(float64), float64(runtime.NumCPU()*secs*1000); got < pc/3 {
+		t.Skipf("the PC was too busy to measure sharing: these chats got %.0f%% of it (need a third); run again when it is quieter", 100*got/pc)
+	}
 	return h, l
 }

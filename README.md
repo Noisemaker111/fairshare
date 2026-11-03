@@ -50,6 +50,13 @@ Review that file before sharing it.
   Code, Codex and OpenCode. It passes, rewrites, or sends back each call, and runs long tests and
   builds through `exec`, which keeps their output out of the chat, stops them before the agent's
   time limit, and stops a run that has hung.
+- **Runs at most two whole suites at once on the PC.** A whole test suite, build or check (not
+  one test file, one Go package or a `-run` filter) waits for one of two heavy-job slots shared by
+  every chat and repo (`FAIRSHARE_HEAVY_SLOTS` changes the count). Without them, six chats each
+  started a full suite and tests failed on their own time limits instead of on bugs. A slot is a
+  lock file Windows frees when its holder exits, however it exits, and a waiting run names who
+  holds each slot. `exec` takes one for foreground runs; the hook puts `fairshare slot` in front of
+  background runs and runs that write to a file. Work started inside a slot never waits again.
 - **Logs every data point.** One JSON line per tool call, long run, chat and `adopt` session goes
   to `%LOCALAPPDATA%\fairshare\events.jsonl`. `fairshare report` reads it back.
 
@@ -71,6 +78,7 @@ fairshare bench lanes                    a 48-thread chat against a 2-thread one
 fairshare ceiling --what idle|spawn      how many idle processes / starts per second the PC takes
 fairshare du <folders>                   real disk use, counting hardlinked files once
 fairshare inspect                        the priorities Windows gave this process
+fairshare slot bun run check             run it once a heavy-job slot is free (the hook adds this)
 ```
 
 `fairshare install` makes `adopt` part of the PC rather than of one agent: a scheduled task (no

@@ -681,17 +681,17 @@ func decide(c Call) Decision {
 		// Long test / build / install runs: full log to a file, summary to the agent, a hang stopped
 		// early. Only unbounded runs (a command already piped into tail chose its own limit).
 		// Variables and redirects belong to the agent's shell, which the runner's fresh shell would not see.
-		if !truthy(input["run_in_background"]) && isLongRun(body) && len(pipes(body)) == 1 && !shellState.MatchString(unquoted(body)) && !shellVars.MatchString(body) {
-			harness := 0
-			switch c.Agent {
-			case "claude":
-				harness = limits.ClaudeMaxMs
-				if truthy(input["timeout"]) {
-					harness = int(num(input["timeout"]))
-				}
-			case "opencode":
+		harness := 0 // the agent's own time limit on this call, when it is known
+		switch c.Agent {
+		case "claude":
+			harness = limits.ClaudeMaxMs
+			if truthy(input["timeout"]) {
 				harness = int(num(input["timeout"]))
 			}
+		case "opencode":
+			harness = int(num(input["timeout"]))
+		}
+		if !truthy(input["run_in_background"]) && isLongRun(body) && len(pipes(body)) == 1 && !shellState.MatchString(unquoted(body)) && !shellVars.MatchString(body) {
 			deadline := 0
 			if harness > 0 {
 				deadline = max(30000, harness-15000)
@@ -705,6 +705,21 @@ func decide(c Call) Decision {
 				body += " " + c.Agent + ":" + clip(c.Session, 8)
 			}
 			rules.add("long-run")
+			s.Text = lead + body
+			continue
+		}
+
+		// A whole suite or check that stays in the agent's shell (background, redirected, piped):
+		// it still waits for a heavy-job slot, with its output and exit code untouched (slot.go).
+		// A leading VAR=value belongs to the command, so that one runs as it is.
+		// In front, it waits at most half the agent's time limit, then says it did not start.
+		if heavyRun(body) && !leadAssign.MatchString(body) {
+			wait := ""
+			if !truthy(input["run_in_background"]) && harness > 0 {
+				wait = fmt.Sprintf("--wait %d ", harness/2)
+			}
+			body = runnerCommand(c.Shell) + " slot " + wait + body
+			rules.add("heavy-slot")
 			s.Text = lead + body
 			continue
 		}

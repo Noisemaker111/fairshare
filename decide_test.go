@@ -156,9 +156,8 @@ func TestLongClaudeRunsGetTenMinutes(t *testing.T) {
 
 func TestLongRunsUseTheRunnerUnlessTheyNeedTheAgentShell(t *testing.T) {
 	dir := t.TempDir()
-	if d := testCall(t, dir, "bun run check:repo *> $log", "pwsh", "codex", nil); d.Kind != "pass" {
-		t.Error(d)
-	}
+	// Redirected runs stay in the agent's shell; whole suites only wait for a heavy-job slot there.
+	match(t, testCall(t, dir, "bun run check:repo *> $log", "pwsh", "codex", nil).Command, `^& '.*' slot bun run check:repo \*> \$log$`)
 	if d := testCall(t, dir, "bun test > out.txt", "bash", "claude", nil); strings.Contains(d.Command, " exec ") {
 		t.Error(d)
 	}
