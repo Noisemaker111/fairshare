@@ -93,7 +93,9 @@ job gets a side job of its own instead, which Windows nests where the process al
 - a test run that made its own job.
 
 Only processes in no job go into the main job, so a test run's job closing can never take the
-chat's other work with it. Twice a second, from the same process list it uses to find new work,
+chat's other work with it. A side job allows breakaway: Claude Code and Codex start every shell in
+a job that allows it, and Git Bash asks for it on every program it starts, so a side job that
+forbade it would make those starts fail with "Permission denied". Twice a second, from the same process list it uses to find new work,
 `adopt` measures each lane, applies throttles and holds back a hogging chat. That costs 2.5 ms
 per look, four looks a second: about 1% of one core.
 

@@ -6,10 +6,12 @@ package main
 // runs in its package's job, and a program that made its own job (a `fairshare exec`) is in that
 // one. Any of them can join a new empty job, which Windows nests inside the job it is in, and its
 // children follow it. So nothing the work starts escapes being counted, prioritized, capped or
-// stopped.
+// stopped. The one way out of a side job is the one its process's own job already allowed
+// (breakaway, see allowBreakaway); such a child is in no job or its old one, and is placed again.
 
 import (
 	"slices"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -61,7 +63,13 @@ func (s *jobSet) place(h windows.Handle) (windows.Handle, error) {
 		}
 	}
 	side, release, err2 := s.newSide()
+	if err2 == nil {
+		err2 = allowBreakaway(side)
+	}
 	if err2 != nil {
+		if release != nil {
+			release()
+		}
 		return 0, or2(err, err2)
 	}
 	if err2 = windows.AssignProcessToJobObject(side, h); err2 != nil {
@@ -104,6 +112,24 @@ func (s *jobSet) release() {
 		j.release()
 	}
 	s.side = nil
+}
+
+// allowBreakaway lets programs in a side job start children outside it. A side job wraps a
+// process that is already in some other job, and that job may allow breakaway: Claude Code and
+// Codex start every shell in such a job, and Git Bash then asks for breakaway on every program it
+// starts, deciding from its job's limits just before the start. A side job that forbade it would
+// fail a start already decided ("Access is denied", bash's "Permission denied", exit 126) in
+// whatever process adopt wrapped at that moment. Allowing it lets nothing out that its own job
+// kept in: Windows stops a breakaway at the first job that forbids one, without an error, so the
+// child lands where it would have without fairshare, and adopt places it again.
+func allowBreakaway(job windows.Handle) error {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	if err := windows.QueryInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil {
+		return err
+	}
+	info.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK
+	_, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	return err
 }
 
 func or2(a, b error) error {
