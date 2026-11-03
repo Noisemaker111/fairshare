@@ -38,7 +38,7 @@ func TestWithoutBalanceALightChatLosesOut(t *testing.T) {
 		t.Errorf("light chat got %.0f ms CPU without balance, so the PC was not contended (want under %.0f)", got, most)
 	}
 	if h["holds"].(float64) != 0 {
-		t.Errorf("held back with --no-balance: %v", h)
+		t.Errorf("held back without --balance: %v", h)
 	}
 }
 
@@ -50,13 +50,13 @@ func TestThrottleCapsAChatAcrossItsJobs(t *testing.T) {
 	bin := fairshareBin(t)
 	dir := t.TempDir()
 	env := append(os.Environ(), "FAIRSHARE_EVENTS="+filepath.Join(dir, "events.jsonl"))
-	c := exec.Command("cmd", "/c", fmt.Sprintf("%s run --normal --no-freeze -- %s spin 8 12", bin, bin))
+	c := exec.Command("cmd", "/c", fmt.Sprintf("%s run --normal -- %s spin 8 12", bin, bin))
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Process.Kill() })
 	time.Sleep(2500 * time.Millisecond) // the spin is in run's job before adopt looks
-	adopt := exec.Command(bin, "adopt", "--no-freeze", "--for", "12s", "--pid", fmt.Sprint(c.Process.Pid))
+	adopt := exec.Command(bin, "adopt","--for", "12s", "--pid", fmt.Sprint(c.Process.Pid))
 	adopt.Env = env
 	if err := adopt.Start(); err != nil {
 		t.Fatal(err)
@@ -91,13 +91,13 @@ func TestThrottleCapsAChatAcrossItsJobs(t *testing.T) {
 // the second must live on: the chat's job must not have been nested inside the first run's.
 func TestOneRunEndingDoesNotKillTheChatsOtherWork(t *testing.T) {
 	bin := fairshareBin(t)
-	c := exec.Command("cmd", "/c", fmt.Sprintf("start /b %s run --normal --no-freeze -- %s spin 1 4 & ping -n 2 127.0.0.1 >nul & ping -n 8 127.0.0.1 >nul", bin, bin))
+	c := exec.Command("cmd", "/c", fmt.Sprintf("start /b %s run --normal -- %s spin 1 4 & ping -n 2 127.0.0.1 >nul & ping -n 8 127.0.0.1 >nul", bin, bin))
 	t0 := time.Now()
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Process.Kill() })
-	adopt := exec.Command(bin, "adopt", "--no-freeze", "--for", "12s", "--pid", fmt.Sprint(c.Process.Pid))
+	adopt := exec.Command(bin, "adopt","--for", "12s", "--pid", fmt.Sprint(c.Process.Pid))
 	adopt.Env = append(os.Environ(), "FAIRSHARE_EVENTS="+filepath.Join(t.TempDir(), "events.jsonl"))
 	time.Sleep(500 * time.Millisecond) // the run and its job exist; the first ping too
 	if err := adopt.Start(); err != nil {
@@ -139,9 +139,9 @@ func laneRun2(t *testing.T, balance bool) (heavyLane, lightLane map[string]any) 
 	}
 	heavy, light := chat(2*runtime.NumCPU()), chat(2)
 	events := filepath.Join(t.TempDir(), "events.jsonl")
-	args := []string{"adopt", "--no-freeze", "--for", "11s", "--pid", fmt.Sprintf("%d,%d", heavy.Process.Pid, light.Process.Pid)}
-	if !balance {
-		args = append(args, "--no-balance")
+	args := []string{"adopt","--for", "11s", "--pid", fmt.Sprintf("%d,%d", heavy.Process.Pid, light.Process.Pid)}
+	if balance {
+		args = append(args, "--balance")
 	}
 	adopt := exec.Command(bin, args...)
 	adopt.Env = append(os.Environ(), "FAIRSHARE_EVENTS="+events)

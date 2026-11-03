@@ -41,23 +41,35 @@ type Policy struct {
 	IOPriority    int    // 0 very low, 1 low, 2 normal; -1 leaves it alone
 	MemPriority   int    // 1 very low .. 5 normal; -1 leaves it alone
 	JobMemoryMB   uint64 // hard commit limit for one piece of work; 0 for none
-	// Memory backpressure (0 turns it off): when free RAM or free commit falls below FreezeBelowMB, the youngest
-	// work on the PC freezes, one piece at a time, until both are back above ResumeAboveMB. The
-	// oldest piece of work never freezes, so work always drains.
+	// Memory backpressure, off unless asked for (0 turns it off): when free RAM or free commit falls
+	// below FreezeBelowMB, the youngest work on the PC freezes (its processes are suspended), one
+	// piece at a time, until both are back above ResumeAboveMB. The oldest piece of work never
+	// freezes, so work always drains.
 	FreezeBelowMB uint64
 	ResumeAboveMB uint64
 }
 
-// DefaultPolicy is "agent work only uses what the foreground leaves over".
+// The memory lines --freeze uses. Resume is close to the freeze line: one finished job should thaw
+// the next.
+const (
+	freezeBelowMB = 6 << 10
+	resumeAboveMB = 7<<10 + 512
+)
+
+// DefaultPolicy is "agent work only uses what the foreground leaves over": it lowers priority and
+// never suspends anything. Freezing is opt-in (--freeze): a frozen chat looks hung to its user.
 func DefaultPolicy() Policy {
 	return Policy{
 		PriorityClass: windows.IDLE_PRIORITY_CLASS,
 		IOPriority:    0,
 		MemPriority:   1,
-		FreezeBelowMB: 6 << 10,
-		ResumeAboveMB: 7<<10 + 512, // close to the freeze line: one finished job should thaw the next
-
 	}
+}
+
+// withFreezing turns on memory backpressure at the given lines.
+func (p Policy) withFreezing(below, above uint64) Policy {
+	p.FreezeBelowMB, p.ResumeAboveMB = below, above
+	return p
 }
 
 type jobCPURate struct {
@@ -332,6 +344,9 @@ func (g *Governor) writeFrozen() {
 	}
 }
 
+// freezeMemStatus is the memory reading backpressure acts on (tests make memory look short).
+var freezeMemStatus = MemStatus
+
 // backpressure acts for the whole PC one step at a time: while memory is short, the youngest
 // running unit anywhere freezes; once memory is back, the oldest frozen unit thaws. The oldest
 // unit never freezes, so work always drains. Each fairshare process only ever touches its own
@@ -343,7 +358,7 @@ func (g *Governor) backpressure() {
 		time.Sleep(200 * time.Millisecond)
 		short, plenty := false, true
 		if g.policy.FreezeBelowMB > 0 {
-			phys, commit, _ := MemStatus()
+			phys, commit, _ := freezeMemStatus()
 			low := min(phys, commit)
 			short, plenty = low < g.policy.FreezeBelowMB, low > g.policy.ResumeAboveMB
 		}

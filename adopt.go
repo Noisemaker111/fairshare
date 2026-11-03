@@ -65,6 +65,17 @@ const (
 	adoptStopEvent = `Local\fairshare-adopt-stop`
 )
 
+// adoptPolicy is what adopt applies to every chat's work: lower priority, and suspension only
+// when freezing was asked for.
+func adoptPolicy(freeze bool, ioPri, memPri int) Policy {
+	p := DefaultPolicy()
+	p.IOPriority, p.MemPriority = ioPri, memPri
+	if freeze {
+		p = p.withFreezing(freezeBelowMB, resumeAboveMB)
+	}
+	return p
+}
+
 func cmdAdopt(args []string) int {
 	fs := flag.NewFlagSet("adopt", flag.ExitOnError)
 	hosts := fs.String("host", defaultHosts, "name prefixes of programs whose every child is one chat, whatever its provider")
@@ -74,9 +85,9 @@ func cmdAdopt(args []string) int {
 	stopAfter := fs.Duration("for", 0, "stop after this long (0 = until stopped)")
 	ioPri := fs.Int("io", 0, "disk priority: 0 very low, 1 low, 2 normal")
 	memPri := fs.Int("mempri", 1, "memory priority: 1 very low .. 5 normal")
-	noFreeze := fs.Bool("no-freeze", false, "never freeze work when memory is short")
-	noBalance := fs.Bool("no-balance", false, "never hold back a chat that takes more than its share")
-	feedback := fs.Bool("feedback", false, "also freeze the youngest work while the foreground is held up (not yet proven at scale)")
+	freeze := fs.Bool("freeze", false, "suspend chats' work while memory is short (off: work is only lowered in priority)")
+	balance := fs.Bool("balance", false, "also hold back a chat that takes more than its share, by dropping its threads to idle priority")
+	feedback := fs.Bool("feedback", false, "suspend the youngest work while the foreground is held up (not yet proven at scale)")
 	verbose := fs.Bool("v", false, "print every process adopted")
 	onlyPIDs := fs.String("pid", "", "comma-separated harness process IDs: watch only these sessions instead of every harness by name")
 	fs.Parse(args)
@@ -108,11 +119,7 @@ func cmdAdopt(args []string) int {
 		defer windows.CloseHandle(stopEvent)
 	}
 
-	p := DefaultPolicy()
-	p.IOPriority, p.MemPriority = *ioPri, *memPri
-	if *noFreeze {
-		p.FreezeBelowMB = 0
-	}
+	p := adoptPolicy(*freeze, *ioPri, *memPri)
 	var sensor *WakeSensor
 	if *feedback {
 		sensor = NewWakeSensor()
@@ -243,7 +250,7 @@ func cmdAdopt(args []string) int {
 			}
 		}
 		if bal != nil {
-			if bal.finish(time.Since(lastBalance).Seconds(), !*noBalance, readCaps()) {
+			if bal.finish(time.Since(lastBalance).Seconds(), *balance, readCaps()) {
 				lastStatus = time.Time{} // show a new throttle at once
 			}
 			lastBalance = time.Now()

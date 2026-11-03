@@ -17,9 +17,9 @@ func cmdRun(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	normal := fs.Bool("normal", false, "keep normal priority (still cleans up the whole tree on exit)")
 	memLimit := fs.Uint64("mem-limit", 0, "fail this run if its whole tree commits more than this many MB (0 = none)")
-	noFreeze := fs.Bool("no-freeze", false, "never freeze this run when memory is short")
-	freezeBelow := fs.Uint64("freeze-below", DefaultPolicy().FreezeBelowMB, "freeze when free RAM or free commit falls below this many MB")
-	resumeAbove := fs.Uint64("resume-above", DefaultPolicy().ResumeAboveMB, "thaw when both are back above this many MB")
+	freeze := fs.Bool("freeze", false, "suspend this run while memory is short (off: it is only lowered in priority)")
+	freezeBelow := fs.Uint64("freeze-below", freezeBelowMB, "with --freeze: suspend when free RAM or free commit falls below this many MB")
+	resumeAbove := fs.Uint64("resume-above", resumeAboveMB, "with --freeze: resume when both are back above this many MB")
 	ioPri := fs.Int("io", 0, "disk priority: 0 very low, 1 low, 2 normal")
 	memPri := fs.Int("mempri", 1, "memory priority: 1 very low .. 5 normal")
 	useCache := fs.Bool("cache", false, "reuse the result of the same command on the same code, and wait for an identical run already in progress instead of repeating it")
@@ -35,11 +35,11 @@ func cmdRun(args []string) int {
 
 	p := DefaultPolicy()
 	p.IOPriority, p.MemPriority, p.JobMemoryMB = *ioPri, *memPri, *memLimit
-	p.FreezeBelowMB, p.ResumeAboveMB = *freezeBelow, *resumeAbove
+	if *freeze {
+		p = p.withFreezing(*freezeBelow, *resumeAbove)
+	}
 	if *normal {
 		p.PriorityClass, p.IOPriority, p.MemPriority = 0, -1, -1
-	}
-	if *noFreeze || *normal {
 		p.FreezeBelowMB = 0
 	}
 	gov, unit, err := enterUnit(p)

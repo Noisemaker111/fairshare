@@ -31,19 +31,21 @@ Review that file before sharing it.
   priority while agent work uses available capacity.
 - **Never leaves anything behind.** `run` puts the tree in a job Windows kills when fairshare
   exits, however it exits.
-- **Freezes instead of melting when memory runs short.** When free RAM or free commit falls
-  below 6 GB, the youngest agent work on the PC freezes, one piece at a time; once it's back
-  above 7.5 GB, the oldest frozen piece thaws. The oldest piece never freezes, so work always
-  drains. Nothing is killed.
+- **Never suspends anything unless asked to.** A suspended chat looks hung, so by default agent
+  work is only lowered in priority. With `--freeze` (`run` or `adopt`), when free RAM or free
+  commit falls below 6 GB, the youngest agent work on the PC freezes, one piece at a time; once
+  it's back above 7.5 GB, the oldest frozen piece thaws. The oldest piece never freezes, so work
+  always drains. Nothing is killed.
 - **Runs a check once for every session.** `run --cache` keys on the exact content of the
   working tree (HEAD's tree plus every changed or new file, read without writing to the repo),
   the folder, the command and chosen environment variables. Not the worktree path: 100 worktrees
   on the same code share one result. A run already in progress is waited for and shared; a
   finished success is reused; a failure is only kept with `--cache-failures`.
-- **Shares the CPU by chat, not by thread.** `adopt` keeps one lane per chat. While a chat waits
-  for the CPU, any chat taking well over an equal share has its threads dropped to the lowest
-  priority, so a chat running 48 busy threads can't starve one running 2. `fairshare throttle`
-  caps one chat outright.
+- **Shares the CPU by chat, not by thread.** `adopt` keeps one lane per chat. With `--balance`,
+  while a chat waits for the CPU, any chat taking well over an equal share has its threads
+  dropped to the lowest priority, so a chat running 48 busy threads can't starve one running 2.
+  It is off by default: on a busy PC it held some chat back most of the time. `fairshare
+  throttle` caps one chat outright.
 - **Every tool call goes through one thread shell.** The `hook` replaces agent-guard for Claude
   Code, Codex and OpenCode. It passes, rewrites, or sends back each call, and runs long tests and
   builds through `exec`, which keeps their output out of the chat, stops them before the agent's
@@ -96,7 +98,7 @@ Only processes in no job go into the main job, so a test run's job closing can n
 chat's other work with it. A side job allows breakaway: Claude Code and Codex start every shell in
 a job that allows it, and Git Bash asks for it on every program it starts, so a side job that
 forbade it would make those starts fail with "Permission denied". Twice a second, from the same process list it uses to find new work,
-`adopt` measures each lane, applies throttles and holds back a hogging chat. That costs 2.5 ms
+`adopt` measures each lane, applies throttles and (with `--balance`) holds back a hogging chat. That costs 2.5 ms
 per look, four looks a second: about 1% of one core.
 
 The `hook` and `adopt` run from `%LOCALAPPDATA%\fairshare\bin`, so rebuilding a checkout never
@@ -171,9 +173,9 @@ shown and back. The share is how much of the 2 cores it asked for the light chat
 | light chat at below-normal priority | 100%, 100% | 20.8, 21.9 cores |
 | heavy chat's threads at lowest priority | 97%, 96% | 20.1, 20.9 cores |
 
-The last row is what `adopt` does: every chat stays at idle priority, below the game, as measured
-above. In the end-to-end test (`TestLanesGiveALightChatItsShare`, two fake chats under `adopt`),
-the light chat got 98% of what it asked for, against 28% with `--no-balance`.
+The last row is what `adopt --balance` does: every chat stays at idle priority, below the game, as
+measured above. In the end-to-end test (`TestLanesGiveALightChatItsShare`, two fake chats under
+`adopt`), the light chat got 98% of what it asked for, against 28% without `--balance`.
 
 The thread shell's hook costs 19 ms a call, against agent-guard's 49 ms (node), on the same two
 calls alternated 15 times each. Inside a chat it logs 5–6 ms of its own work.
