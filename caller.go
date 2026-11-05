@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // endWithCaller ends this process when any process that started it ends, and with this process
@@ -53,55 +53,53 @@ func endWithCaller(verb string) {
 	}()
 }
 
-// maxWaitObjects is how many handles one WaitForMultipleObjects call takes.
-const maxWaitObjects = 64
-
 type caller struct {
 	h    windows.Handle
 	name string
 }
 
+// findCallers walks this process's ancestors with liveProc (one process at a time, not a whole-PC
+// list) and opens each for waiting.
 func findCallers() []caller {
-	procs := snapshot()
 	var out []caller
 	seen := map[uint32]bool{}
-	var chain []uint32 // this process and the ancestors found since the last break
-	cur := windows.GetCurrentProcessId()
-	chain = append(chain, cur)
+	chain := []uint32{windows.GetCurrentProcessId()} // this process and the ancestors found
 	usedMsys := false
-	for len(out) < maxWaitObjects-1 {
-		if _, ok := procs[cur]; !ok {
-			break
-		}
-		next, ok := livingParent(procs, cur)
+	for len(out) < windows.MAXIMUM_WAIT_OBJECTS-1 {
+		next, ok := livingParent(chain[len(chain)-1])
 		if !ok && !usedMsys {
 			usedMsys = true // one read of Git Bash's table covers every break above
-			next, ok = msysParent(procs, chain)
+			next, ok = msysParent(chain)
 		}
-		if !ok || seen[next] || strings.EqualFold(procs[next].name, "explorer.exe") {
+		if !ok || seen[next] {
+			break
+		}
+		p, ok := liveProc(next)
+		if !ok || p.name == "explorer.exe" {
 			break
 		}
 		seen[next] = true
-		if h, ok := openCaller(next, procs[next].created); ok {
-			out = append(out, caller{h, fmt.Sprintf("%s (%d)", procs[next].name, next)})
+		if h, ok := openCaller(next, p.created); ok {
+			out = append(out, caller{h, fmt.Sprintf("%s (%d)", p.name, next)})
 		}
 		chain = append(chain, next)
-		cur = next
 	}
 	return out
 }
 
 // livingParent is pid's Windows parent while that parent is still the process that started it.
-func livingParent(procs map[uint32]procInfo, pid uint32) (uint32, bool) {
-	c := procs[pid]
-	par, ok := procs[c.ppid]
-	if !ok || c.ppid == pid || c.ppid == 0 || par.created > c.created {
+func livingParent(pid uint32) (uint32, bool) {
+	c, ok := liveProc(pid)
+	if !ok || c.ppid == pid || c.ppid == 0 {
+		return 0, false
+	}
+	if par, ok := liveProc(c.ppid); !ok || par.created > c.created {
 		return 0, false // the parent is gone, or its ID now names a younger process
 	}
 	return c.ppid, true
 }
 
-// openCaller opens pid for waiting if it is still the process snapshot saw.
+// openCaller opens pid for waiting if it is still the process liveProc saw.
 func openCaller(pid uint32, created uint64) (windows.Handle, bool) {
 	h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
@@ -118,7 +116,7 @@ func openCaller(pid uint32, created uint64) (windows.Handle, bool) {
 // msysParent finds the caller of a chain whose Windows links broke at a Git Bash process: Git
 // Bash's ps maps each of its process IDs to a Windows one, and an exec keeps the ID, so the
 // ancestor nearest the break that ps lists has the real caller as its parent there.
-func msysParent(procs map[uint32]procInfo, chain []uint32) (uint32, bool) {
+func msysParent(chain []uint32) (uint32, bool) {
 	ps := ""
 	for _, pid := range chain {
 		if p := msysTool(pid, "ps.exe"); p != "" {
@@ -147,7 +145,9 @@ func msysParent(procs map[uint32]procInfo, chain []uint32) (uint32, bool) {
 		if !ok {
 			return 0, false
 		}
-		if p, ok := procs[win]; ok && p.created <= procs[chain[i]].created {
+		p, ok1 := liveProc(win)
+		c, ok2 := liveProc(chain[i])
+		if ok1 && ok2 && p.created <= c.created {
 			return win, true
 		}
 		return 0, false
@@ -185,7 +185,7 @@ func msysTool(pid uint32, tool string) string {
 		return ""
 	}
 	defer windows.CloseHandle(h)
-	buf := make([]uint16, windows.MAX_LONG_PATH)
+	buf := make([]uint16, 32768)
 	n := uint32(len(buf))
 	if windows.QueryFullProcessImageName(h, 0, &buf[0], &n) != nil {
 		return ""

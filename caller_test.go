@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // An agent harness stops a background command by killing the tree under its shell, by Windows
@@ -95,8 +95,8 @@ func alive(pid uint32) bool {
 }
 
 func nowTicks() uint64 {
-	var ft windows.Filetime
-	windows.GetSystemTimeAsFileTime(&ft)
+	var ft syscall.Filetime
+	syscall.GetSystemTimeAsFileTime(&ft)
 	return ftTicks(ft)
 }
 
