@@ -42,7 +42,13 @@ pass that way. A test's own `adopt` always takes `--pid`, and a test never runs 
   which makes the same call and copies it: 5.4 ms against 2.5 ms per look.
 - Measure process CPU with `GetProcessTimes` (see `pidsCPU`), and time sub-millisecond work with
   `nowMs` (the performance counter). Go's own clock on Windows moves in ~0.5 ms steps.
+- Windows calls go through `internal/windows`, never `golang.org/x/sys/windows`: that imports
+  `net`, whose init starts Winsock, 3 ms of every hook call (`TestNoNetInBinary`).
+- The hook runs on every agent tool call, so it never lists the whole PC (`snapshot`, 5 ms): it walks
+  its own ancestors with `liveProc`. Claude Code starts it in exec form (`command` + `args`); a
+  plain command line would go through Git Bash first, about 90 ms.
 
 ## Land
 
-Local repo, no remote. Land by committing to `main` after the test line passes.
+Land through a pull request to `main` on GitHub (`origin`) after the test line passes, then run
+`fairshare install` from the merged build.
