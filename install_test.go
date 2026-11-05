@@ -19,6 +19,7 @@ func TestInstallReplacesAgentGuardAndIsIdempotent(t *testing.T) {
 	settings := filepath.Join(home, ".claude", "settings.json")
 	os.WriteFile(settings, []byte(`{"model":"x","hooks":{"PreToolUse":[
 		{"matcher":"Bash|PowerShell","hooks":[{"type":"command","command":"node \"C:/p/agent-guard/guard.mjs\" claude","timeout":10}]},
+		{"matcher":"Read","hooks":[{"type":"command","command":"C:/old/fairshare/bin/fairshare.exe hook claude","timeout":330}]},
 		{"matcher":"Edit","hooks":[{"type":"command","command":"other-tool check"}]}]}}`), 0o644)
 	codexHooks := filepath.Join(home, ".codex", "hooks.json")
 	os.WriteFile(codexHooks, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"node \"C:/p/agent-guard/guard.mjs\" codex","timeout":10}]}]}}`), 0o644)
@@ -55,7 +56,33 @@ func TestInstallReplacesAgentGuardAndIsIdempotent(t *testing.T) {
 		t.Fatal("codex hooks:", h)
 	}
 	command := hooks.Hooks.PreToolUse[0].Hooks[0].Command
-	if strings.Contains(s, "agent-guard") || strings.Count(s, strings.TrimSuffix(command, "codex")+"claude") != 2 || !strings.Contains(s, "other-tool check") || !strings.Contains(s, `"model": "x"`) {
+	// Claude Code gets the exec form, which it starts without a shell: one entry per matcher,
+	// replacing the shell-form entry an older install wrote.
+	var claude struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Matcher string
+				Hooks   []struct {
+					Command string
+					Args    []string
+				}
+			}
+		}
+	}
+	json.Unmarshal([]byte(s), &claude)
+	exe := strings.TrimSuffix(command, " hook codex")
+	var direct []string
+	for _, g := range claude.Hooks.PreToolUse {
+		for _, hk := range g.Hooks {
+			if len(hk.Args) > 0 || strings.Contains(strings.ToLower(hk.Command), "fairsh") {
+				if hk.Command != exe || strings.Join(hk.Args, " ") != "hook claude" {
+					t.Errorf("claude hook for %s: %q %q", g.Matcher, hk.Command, hk.Args)
+				}
+				direct = append(direct, g.Matcher)
+			}
+		}
+	}
+	if strings.Join(direct, ",") != "Bash|PowerShell,Read" || strings.Contains(s, "agent-guard") || !strings.Contains(s, "other-tool check") || !strings.Contains(s, `"model": "x"`) {
 		t.Error("claude settings:", s)
 	}
 	if strings.Contains(h, "agent-guard") {
@@ -79,6 +106,13 @@ func TestInstallReplacesAgentGuardAndIsIdempotent(t *testing.T) {
 		if err != nil || !strings.Contains(string(out), "Select-Object -First 3") {
 			t.Errorf("%s could not run the hook %q: %v %s", sh[0], command, err, out)
 		}
+	}
+	// Claude Code starts its entry directly, no shell: the program and args as written must run.
+	started := exec.Command(exe, "hook", "claude")
+	started.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bun run verify:fast"},"cwd":"C:\\"}`)
+	started.Env = append(os.Environ(), "FAIRSHARE_EVENTS="+filepath.Join(home, "events.jsonl"))
+	if out, err := started.CombinedOutput(); err != nil || !strings.Contains(string(out), " exec bash ") {
+		t.Errorf("Claude's exec-form hook %q did not run: %v %s", exe, err, out)
 	}
 	if _, err := os.Stat(filepath.Join(home, "local", "fairshare", "bin", "fairshare.exe")); err != nil {
 		t.Error("not copied:", err)
