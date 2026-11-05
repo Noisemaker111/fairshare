@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,5 +21,25 @@ func TestNoNetInBinary(t *testing.T) {
 		if p == "net" {
 			t.Fatal("fairshare links package net; its init costs every hook call 3 ms. `go list -f '{{.ImportPath}}: {{.Imports}}' -deps .` shows who imports it")
 		}
+	}
+}
+
+// Each logged call carries what it cost since Windows created the process (proc_ms) besides the
+// hook's own work (hook_ms): the start is most of a call, and only the hook can see it.
+func TestHookLogsProcessStartCost(t *testing.T) {
+	events := filepath.Join(t.TempDir(), "events.jsonl")
+	c := exec.Command(fairshareBin(t), "hook", "claude")
+	c.Stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"true"},"cwd":"C:/"}`)
+	c.Env = append(os.Environ(), "FAIRSHARE_EVENTS="+events)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	b, _ := os.ReadFile(events)
+	var ev struct {
+		HookMs *int64 `json:"hook_ms"`
+		ProcMs *int64 `json:"proc_ms"`
+	}
+	if err := json.Unmarshal(b, &ev); err != nil || ev.HookMs == nil || ev.ProcMs == nil || *ev.ProcMs <= 0 || *ev.ProcMs < *ev.HookMs {
+		t.Fatalf("event %s: hook_ms %v proc_ms %v", b, ev.HookMs, ev.ProcMs)
 	}
 }
