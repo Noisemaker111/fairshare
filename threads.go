@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 var (
@@ -53,7 +53,7 @@ type procInfo struct {
 	created uint64 // start time; with the ID it names one process even after the ID is reused
 }
 
-var snapBuf = make([]byte, 1<<20)
+var snapBuf []byte // grows to fit; made on first use, so commands that never list processes (the hook) skip it
 
 // snapshot lists every process on the PC (half the cost of a Toolhelp snapshot, which makes this
 // same query and then copies it).
@@ -74,6 +74,9 @@ func eachThread(wanted func(pid uint32) bool, f func(threadInfo)) bool {
 // scan reads one snapshot of every process and thread on the PC. It calls onProc for every
 // process, and f for each thread of the processes onProc returns true for.
 func scan(onProc func(procEntry) bool, f func(threadInfo)) bool {
+	if snapBuf == nil {
+		snapBuf = make([]byte, 1<<20)
+	}
 	for {
 		var need uint32
 		st, _, _ := ntQuerySystemInformation.Call(systemProcessInformation, uintptr(unsafe.Pointer(&snapBuf[0])), uintptr(len(snapBuf)), uintptr(unsafe.Pointer(&need)))

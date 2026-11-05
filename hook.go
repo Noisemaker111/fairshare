@@ -100,8 +100,10 @@ func cmdHook(args []string) int {
 	if p.Input == nil {
 		p.Input = map[string]any{}
 	}
-	// chat_pid ties the call to its chat's lane (adopt names lanes by harness process)
-	ev := map[string]any{"agent": agent, "tool": p.Tool, "session": p.Session, "cwd": p.Cwd, "chat_pid": newChatRule(defaultHosts, defaultHarness).of(uint32(os.Getpid()), snapshot())}
+	// chat_pid ties the call to its chat's lane (adopt names lanes by harness process). Only logged
+	// calls look it up: a Read that waits on nothing logs nothing.
+	ev := map[string]any{"agent": agent, "tool": p.Tool, "session": p.Session, "cwd": p.Cwd}
+	chat := func() uint32 { return newChatRule(defaultHosts, defaultHarness).of(uint32(os.Getpid()), liveProc) }
 
 	// Claude's Read of a still-running task's output: wait here, then let the read through (no turn spent).
 	if agent == "claude" && p.Tool == "Read" {
@@ -109,7 +111,7 @@ func cmdHook(args []string) int {
 		if running := runningTaskFile(file); running != "" {
 			why := awaitTask(running, 300*time.Second, 20*time.Second)
 			ev["kind"], ev["rules"], ev["cmd"], ev["waited"] = "wait", "early-read", clip(file, 300), why
-			ev["hook_ms"] = time.Since(t0).Milliseconds()
+			ev["chat_pid"], ev["hook_ms"] = chat(), time.Since(t0).Milliseconds()
 			logEvent("call", ev)
 		}
 		return 0
@@ -139,7 +141,7 @@ func cmdHook(args []string) int {
 			os.Stdout.Write(b)
 		}
 	}
-	ev["hook_ms"] = time.Since(t0).Milliseconds()
+	ev["chat_pid"], ev["hook_ms"] = chat(), time.Since(t0).Milliseconds()
 	logEvent("call", ev)
 	return 0
 }

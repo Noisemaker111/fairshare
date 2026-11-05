@@ -13,7 +13,7 @@ import (
 	"slices"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 type sideJob struct {

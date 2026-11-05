@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 func awaitTask(file string, maxWait, quiet time.Duration) string {

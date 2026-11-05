@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // If adopt dies holding work frozen, the guard must thaw it.

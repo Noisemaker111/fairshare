@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // codexTrustHash is sha256 over the sorted-key JSON of the normalized hook identity
@@ -132,7 +132,10 @@ func ours(h any, command string) bool {
 	}
 	c, _ := m["command"].(string)
 	lc := strings.ToLower(c)
-	return strings.HasPrefix(c, command+" hook ") || strings.Contains(lc, "fairshare") && strings.Contains(c, " hook ") || strings.Contains(c, "agent-guard") && strings.Contains(c, "guard.mjs")
+	args, _ := m["args"].([]any)
+	execHook := len(args) > 0 && args[0] == "hook"
+	return c == command && execHook || strings.HasPrefix(c, command+" hook ") || strings.Contains(lc, "fairshare") && (execHook || strings.Contains(c, " hook ")) ||
+		strings.Contains(c, "agent-guard") && strings.Contains(c, "guard.mjs")
 }
 
 type hookEntry struct {
@@ -141,7 +144,9 @@ type hookEntry struct {
 }
 
 // register rewrites the PreToolUse groups in a hooks file and returns the index of the first new group.
-func register(path, agent string, entries []hookEntry, uninstall bool, command string) (map[string]any, int, error) {
+// direct writes the hook in exec form (the program and its arguments, which the agent starts
+// itself); otherwise it is one command line the agent runs through its shell.
+func register(path, agent string, entries []hookEntry, uninstall bool, command string, direct bool) (map[string]any, int, error) {
 	j, err := readJSONFile(path)
 	if err != nil {
 		return nil, -1, err
@@ -170,7 +175,11 @@ func register(path, agent string, entries []hookEntry, uninstall bool, command s
 	var first map[string]any
 	if !uninstall {
 		for i, e := range entries {
-			g := map[string]any{"matcher": e.matcher, "hooks": []any{map[string]any{"type": "command", "command": command + " hook " + agent, "timeout": e.timeout}}}
+			h := map[string]any{"type": "command", "command": command + " hook " + agent, "timeout": e.timeout}
+			if direct {
+				h["command"], h["args"] = command, []any{"hook", agent}
+			}
+			g := map[string]any{"matcher": e.matcher, "hooks": []any{h}}
 			groups = append(groups, g)
 			if i == 0 {
 				index, first = len(groups)-1, g
@@ -225,9 +234,9 @@ func installCopy() (string, error) {
 	return dst, os.Rename(dst+".new", dst)
 }
 
-// hookCommand is how the agents start the hook. Each agent runs it through a different shell
-// (Claude Code: bash; Codex: PowerShell, where a line starting with a quoted path is a parse
-// error), so it is a bare path with forward slashes, which bash, cmd and PowerShell all run. A
+// hookCommand is the path the agents start the hook from. Claude Code starts it directly (exec
+// form). Codex runs it through PowerShell, where a line starting with a quoted path is a parse
+// error, so it is a bare path with forward slashes, which bash, cmd and PowerShell all run. A
 // path with a space uses its short form.
 func hookCommand(exe string) (string, error) {
 	p := exe
@@ -268,8 +277,10 @@ func cmdInstall(args []string) int {
 	home := homeDir()
 
 	// Claude Code. A Read of a still-running task's output waits inside the hook, up to 300 s.
+	// Exec form: Claude Code starts a command hook through Git Bash otherwise, and that start
+	// (about 90 ms) cost more than the hook itself on every tool call.
 	claude := filepath.Join(home, ".claude", "settings.json")
-	if _, _, err := register(claude, "claude", []hookEntry{{"Bash|PowerShell", 10}, {"Read", 330}}, uninstall, command); err != nil {
+	if _, _, err := register(claude, "claude", []hookEntry{{"Bash|PowerShell", 10}, {"Read", 330}}, uninstall, command, true); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -282,7 +293,7 @@ func cmdInstall(args []string) int {
 	}
 	hooksFile := filepath.Join(codexHome, "hooks.json")
 	configFile := filepath.Join(codexHome, "config.toml")
-	group, index, err := register(hooksFile, "codex", []hookEntry{{"Bash|write_stdin|wait", 10}}, uninstall, command)
+	group, index, err := register(hooksFile, "codex", []hookEntry{{"Bash|write_stdin|wait", 10}}, uninstall, command, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

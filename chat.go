@@ -12,7 +12,13 @@ package main
 //
 // The walk stops at a parent whose start time is later than its child's: that ID was reused.
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+	"unsafe"
+
+	"github.com/Noisemaker111/fairshare/internal/windows"
+)
 
 const (
 	defaultHosts   = "t3 code"
@@ -42,13 +48,15 @@ func (r chatRule) isHost(name string) bool {
 	return false
 }
 
-// of returns the chat pid belongs to, or 0. A chat is never its own chat's work.
-func (r chatRule) of(pid uint32, procs map[uint32]procInfo) uint32 {
+// of returns the chat pid belongs to, or 0. A chat is never its own chat's work. look finds a
+// process: inSnapshot for adopt, which has every process anyway, liveProc for the hook, which
+// only needs its own few ancestors and would spend 5 ms of every call listing the whole PC.
+func (r chatRule) of(pid uint32, look func(uint32) (procInfo, bool)) uint32 {
 	var nearest uint32
 	cur := pid
 	for depth := 0; depth < 64; depth++ {
-		c := procs[cur]
-		par, ok := procs[c.ppid]
+		c, _ := look(cur)
+		par, ok := look(c.ppid)
 		if !ok || c.ppid == cur || par.created > c.created {
 			break
 		}
@@ -67,4 +75,39 @@ func (r chatRule) of(pid uint32, procs map[uint32]procInfo) uint32 {
 		cur = c.ppid
 	}
 	return nearest
+}
+
+func inSnapshot(procs map[uint32]procInfo) func(uint32) (procInfo, bool) {
+	return func(pid uint32) (procInfo, bool) {
+		p, ok := procs[pid]
+		return p, ok
+	}
+}
+
+// liveProc asks Windows about one process: its parent, start time and image name, as the
+// snapshot names it (lower-case base name).
+func liveProc(pid uint32) (procInfo, bool) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return procInfo{}, false
+	}
+	defer windows.CloseHandle(h)
+	var pbi windows.PROCESS_BASIC_INFORMATION
+	if windows.NtQueryInformationProcess(h, windows.ProcessBasicInformation, unsafe.Pointer(&pbi), uint32(unsafe.Sizeof(pbi)), nil) != nil {
+		return procInfo{}, false
+	}
+	var created, exited, kernel, user windows.Filetime
+	if windows.GetProcessTimes(h, &created, &exited, &kernel, &user) != nil {
+		return procInfo{}, false
+	}
+	buf := make([]uint16, 1024)
+	n := uint32(len(buf))
+	if windows.QueryFullProcessImageName(h, 0, &buf[0], &n) != nil {
+		return procInfo{}, false
+	}
+	return procInfo{
+		ppid:    uint32(pbi.InheritedFromUniqueProcessId),
+		name:    strings.ToLower(filepath.Base(windows.UTF16ToString(buf[:n]))),
+		created: uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime),
+	}, true
 }

@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // The probe stands in for a game in the foreground: every 16.7 ms (60 fps) four threads each do a

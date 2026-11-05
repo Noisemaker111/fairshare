@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // heldEnv marks work that already holds a slot, so what it starts never waits for a second one.
