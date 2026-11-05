@@ -10,7 +10,19 @@ import (
 	"os"
 	"runtime"
 	"time"
+
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
+
+// sinceProcessStart is how long ago Windows created this process, in ms: what a call costs before
+// the hook's own work (loader, runtime and package init) plus that work. hook_ms is the work alone.
+func sinceProcessStart() int64 {
+	var created, exited, kernel, user windows.Filetime
+	if windows.GetProcessTimes(windows.CurrentProcess(), &created, &exited, &kernel, &user) != nil {
+		return -1
+	}
+	return time.Since(time.Unix(0, created.Nanoseconds())).Milliseconds()
+}
 
 type hookPayload struct {
 	Event     string         `json:"hook_event_name"`
@@ -111,7 +123,7 @@ func cmdHook(args []string) int {
 		if running := runningTaskFile(file); running != "" {
 			why := awaitTask(running, 300*time.Second, 20*time.Second)
 			ev["kind"], ev["rules"], ev["cmd"], ev["waited"] = "wait", "early-read", clip(file, 300), why
-			ev["chat_pid"], ev["hook_ms"] = chat(), time.Since(t0).Milliseconds()
+			ev["chat_pid"], ev["hook_ms"], ev["proc_ms"] = chat(), time.Since(t0).Milliseconds(), sinceProcessStart()
 			logEvent("call", ev)
 		}
 		return 0
@@ -141,7 +153,7 @@ func cmdHook(args []string) int {
 			os.Stdout.Write(b)
 		}
 	}
-	ev["chat_pid"], ev["hook_ms"] = chat(), time.Since(t0).Milliseconds()
+	ev["chat_pid"], ev["hook_ms"], ev["proc_ms"] = chat(), time.Since(t0).Milliseconds(), sinceProcessStart()
 	logEvent("call", ev)
 	return 0
 }

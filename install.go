@@ -115,6 +115,9 @@ func writeJSONFile(path string, m map[string]any) error {
 		return err
 	}
 	backup(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
@@ -147,6 +150,9 @@ type hookEntry struct {
 // direct writes the hook in exec form (the program and its arguments, which the agent starts
 // itself); otherwise it is one command line the agent runs through its shell.
 func register(path, agent string, entries []hookEntry, uninstall bool, command string, direct bool) (map[string]any, int, error) {
+	if _, err := os.Stat(path); uninstall && os.IsNotExist(err) {
+		return nil, -1, nil
+	}
 	j, err := readJSONFile(path)
 	if err != nil {
 		return nil, -1, err
@@ -276,52 +282,26 @@ func cmdInstall(args []string) int {
 	}
 	home := homeDir()
 
-	// Claude Code. A Read of a still-running task's output waits inside the hook, up to 300 s.
-	// Exec form: Claude Code starts a command hook through Git Bash otherwise, and that start
-	// (about 90 ms) cost more than the hook itself on every tool call.
-	claude := filepath.Join(home, ".claude", "settings.json")
-	if _, _, err := register(claude, "claude", []hookEntry{{"Bash|PowerShell", 10}, {"Read", 330}}, uninstall, command, true); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	fmt.Println(map[bool]string{false: "registered in", true: "removed from"}[uninstall], claude)
-
-	// Codex
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
-	hooksFile := filepath.Join(codexHome, "hooks.json")
-	configFile := filepath.Join(codexHome, "config.toml")
-	group, index, err := register(hooksFile, "codex", []hookEntry{{"Bash|write_stdin|wait", 10}}, uninstall, command, false)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	tomlBytes, _ := os.ReadFile(configFile)
-	toml := string(tomlBytes)
-	// Drop any trust entry written before by this or agent-guard, at any index.
-	marked := regexp.MustCompile(`(?m)^\[hooks\.state\.'` + regexp.QuoteMeta(hooksFile) + `:pre_tool_use:\d+:\d+'\]\r?\ntrusted_hash = "[^"]*"\r?\n# (?:agent-guard|fairshare)\r?\n(?:\r?\n)*`)
-	toml = marked.ReplaceAllString(toml, "")
-	if !uninstall {
-		// Also any table with the key about to be written, whoever wrote it: Codex writes its own
-		// (unmarked) when a hook is trusted in its UI, and two tables with one key stop Codex starting.
-		key := fmt.Sprintf("%s:pre_tool_use:%d:0", hooksFile, index)
-		same := regexp.MustCompile(`(?m)^\[hooks\.state\.(?:'` + regexp.QuoteMeta(key) + `'|"` + regexp.QuoteMeta(strings.ReplaceAll(key, `\`, `\\`)) + `")\][^\n]*\n(?:[A-Za-z_"'][^\n]*\n|\r?\n)*`)
-		toml = same.ReplaceAllString(toml, "")
-		if !regexp.MustCompile(`(?m)^\[hooks\.state\]`).MatchString(toml) {
-			toml = strings.TrimRight(toml, " \t\r\n") + "\n\n[hooks.state]\n"
+	// Claude Code, in every config folder it runs from. A Read of a still-running task's output
+	// waits inside the hook, up to 300 s. Exec form: Claude Code starts a command hook through Git
+	// Bash otherwise, and that start (about 90 ms) cost more than the hook itself on every tool call.
+	for _, dir := range agentHomes(filepath.Join(home, ".claude"), "CLAUDE_CONFIG_DIR", "claudeAgent") {
+		claude := filepath.Join(dir, "settings.json")
+		if _, _, err := register(claude, "claude", []hookEntry{{"Bash|PowerShell", 10}, {"Read", 330}}, uninstall, command, true); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
 		}
-		entry := fmt.Sprintf("\n[hooks.state.'%s:pre_tool_use:%d:0']\ntrusted_hash = \"%s\"\n# fairshare\n", hooksFile, index, codexTrustHash("pre_tool_use", roundTrip(group)))
-		loc := regexp.MustCompile(`\[hooks\.state\][^\n]*\n`).FindStringIndex(toml)
-		toml = toml[:loc[1]] + entry + toml[loc[1]:]
+		fmt.Println(map[bool]string{false: "registered in", true: "removed from"}[uninstall], claude)
 	}
-	backup(configFile)
-	if err := os.WriteFile(configFile, []byte(toml), 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+
+	for _, dir := range agentHomes(filepath.Join(home, ".codex"), "CODEX_HOME", "codex") {
+		hooksFile, err := registerCodex(dir, command, uninstall)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Println(map[bool]string{false: "registered and trusted in", true: "removed from"}[uninstall], hooksFile)
 	}
-	fmt.Println(map[bool]string{false: "registered and trusted in", true: "removed from"}[uninstall], hooksFile)
 
 	// OpenCode loads every folder in its plugins directory.
 	dir, err := installOpenCodePlugin(uninstall)
@@ -341,6 +321,78 @@ func cmdInstall(args []string) int {
 	}
 	fmt.Println(map[bool]string{false: "adopt running for every chat; task", true: "adopt stopped; removed task"}[uninstall], adoptTask)
 	return 0
+}
+
+// registerCodex registers the hook in one Codex home and trusts it there: Codex skips untrusted
+// hooks, so the trust hash Codex computes for the entry goes into that home's config.toml.
+func registerCodex(codexHome, command string, uninstall bool) (string, error) {
+	hooksFile := filepath.Join(codexHome, "hooks.json")
+	configFile := filepath.Join(codexHome, "config.toml")
+	group, index, err := register(hooksFile, "codex", []hookEntry{{"Bash|write_stdin|wait", 10}}, uninstall, command, false)
+	if err != nil {
+		return "", err
+	}
+	tomlBytes, _ := os.ReadFile(configFile)
+	toml := string(tomlBytes)
+	// Drop any trust entry written before by this or agent-guard, at any index.
+	marked := regexp.MustCompile(`(?m)^\[hooks\.state\.'` + regexp.QuoteMeta(hooksFile) + `:pre_tool_use:\d+:\d+'\]\r?\ntrusted_hash = "[^"]*"\r?\n# (?:agent-guard|fairshare)\r?\n(?:\r?\n)*`)
+	toml = marked.ReplaceAllString(toml, "")
+	if !uninstall {
+		// Also any table with the key about to be written, whoever wrote it: Codex writes its own
+		// (unmarked) when a hook is trusted in its UI, and two tables with one key stop Codex starting.
+		key := fmt.Sprintf("%s:pre_tool_use:%d:0", hooksFile, index)
+		same := regexp.MustCompile(`(?m)^\[hooks\.state\.(?:'` + regexp.QuoteMeta(key) + `'|"` + regexp.QuoteMeta(strings.ReplaceAll(key, `\`, `\\`)) + `")\][^\n]*\n(?:[A-Za-z_"'][^\n]*\n|\r?\n)*`)
+		toml = same.ReplaceAllString(toml, "")
+		if !regexp.MustCompile(`(?m)^\[hooks\.state\]`).MatchString(toml) {
+			toml = strings.TrimRight(toml, " \t\r\n") + "\n\n[hooks.state]\n"
+		}
+		entry := fmt.Sprintf("\n[hooks.state.'%s:pre_tool_use:%d:0']\ntrusted_hash = \"%s\"\n# fairshare\n", hooksFile, index, codexTrustHash("pre_tool_use", roundTrip(group)))
+		loc := regexp.MustCompile(`\[hooks\.state\][^\n]*\n`).FindStringIndex(toml)
+		toml = toml[:loc[1]] + entry + toml[loc[1]:]
+	}
+	if toml != string(tomlBytes) {
+		backup(configFile)
+		if err := os.WriteFile(configFile, []byte(toml), 0o644); err != nil {
+			return "", err
+		}
+	}
+	return hooksFile, nil
+}
+
+// agentHomes lists every config folder an agent runs from: its default, the one its environment
+// variable names, and each one T3 Code starts that provider with (a provider instance's homePath
+// in T3's settings, such as the "Claude Hub" instance in ~/.claude-hub). Each needs its own hooks.
+func agentHomes(def, envVar, t3Driver string) []string {
+	homes := []string{def}
+	if v := os.Getenv(envVar); v != "" {
+		homes = append(homes, v)
+	}
+	t3, _ := readJSONFile(filepath.Join(homeDir(), ".t3", "userdata", "settings.json"))
+	instances, _ := t3["providerInstances"].(map[string]any)
+	var fromT3 []string
+	for _, v := range instances {
+		inst, _ := v.(map[string]any)
+		cfg, _ := inst["config"].(map[string]any)
+		dir, _ := cfg["homePath"].(string)
+		if inst["driver"] != t3Driver || strings.TrimSpace(dir) == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(dir, "~"); ok {
+			dir = homeDir() + rest
+		}
+		fromT3 = append(fromT3, dir)
+	}
+	sort.Strings(fromT3)
+	var out []string
+	seen := map[string]bool{}
+	for _, h := range append(homes, fromT3...) {
+		key := strings.ToLower(filepath.Clean(h))
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, filepath.Clean(h))
+		}
+	}
+	return out
 }
 
 // roundTrip gives a value the shape it has when read back from JSON (numbers as float64).
