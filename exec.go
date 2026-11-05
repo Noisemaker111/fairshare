@@ -188,6 +188,7 @@ func cmdExec(args []string) int {
 		label = args[3]
 	}
 	signal.Ignore(os.Interrupt) // the command gets Ctrl+C itself; we wait for it and pass on its code
+	endWithCaller("exec")
 	pruneLogs()
 	if d, err := time.ParseDuration(os.Getenv("FAIRSHARE_HUNG_AFTER")); err == nil && d > 0 {
 		hungAfter = d // for checks of the hang stop itself

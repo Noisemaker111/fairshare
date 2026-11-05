@@ -29,6 +29,8 @@ const (
 	MAX_PATH             = 260
 	INFINITE             = 0xFFFFFFFF
 	WAIT_OBJECT_0        = 0
+	WAIT_TIMEOUT         = 0x102
+	MAXIMUM_WAIT_OBJECTS = 64
 
 	DELETE                            = 0x00010000
 	SYNCHRONIZE                       = 0x00100000
@@ -38,6 +40,8 @@ const (
 	EVENT_MODIFY_STATE                = 0x0002
 	PROCESS_TERMINATE                 = 0x0001
 	PROCESS_SET_QUOTA                 = 0x0100
+	PROCESS_CREATE_PROCESS            = 0x0080
+	PROCESS_DUP_HANDLE                = 0x0040
 	PROCESS_SET_INFORMATION           = 0x0200
 	PROCESS_SUSPEND_RESUME            = 0x0800
 	PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -70,6 +74,7 @@ const (
 	DETACHED_PROCESS            = 0x00000008
 	CREATE_NEW_PROCESS_GROUP    = 0x00000200
 	CREATE_NO_WINDOW            = 0x08000000
+	CREATE_SUSPENDED            = 0x00000004
 
 	JOB_OBJECT_LIMIT_PRIORITY_CLASS     = 0x00000020
 	JOB_OBJECT_LIMIT_JOB_MEMORY         = 0x00000200
@@ -169,6 +174,8 @@ var (
 	procGetShortPathNameW            = kernel32.NewProc("GetShortPathNameW")
 	procQueryFullProcessImageNameW   = kernel32.NewProc("QueryFullProcessImageNameW")
 	procNtQueryInformationProcess    = ntdll.NewProc("NtQueryInformationProcess")
+	procWaitForMultipleObjects       = kernel32.NewProc("WaitForMultipleObjects")
+	procProcessIdToSessionId         = kernel32.NewProc("ProcessIdToSessionId")
 )
 
 // NewLazySystemDLL loads name from System32 only, never from the current or program folder.
@@ -337,4 +344,21 @@ func NtQueryInformationProcess(process Handle, class int32, info unsafe.Pointer,
 		return NTStatus(r)
 	}
 	return nil
+}
+
+// WaitForMultipleObjects waits for one (or, with waitAll, every) handle, up to MAXIMUM_WAIT_OBJECTS.
+func WaitForMultipleObjects(handles []Handle, waitAll bool, ms uint32) (uint32, error) {
+	if len(handles) == 0 || len(handles) > MAXIMUM_WAIT_OBJECTS {
+		return 0, syscall.EINVAL
+	}
+	r, _, e := procWaitForMultipleObjects.Call(uintptr(len(handles)), uintptr(unsafe.Pointer(&handles[0])), b(waitAll), uintptr(ms))
+	if uint32(r) == 0xFFFFFFFF {
+		return 0, errno(e)
+	}
+	return uint32(r), nil
+}
+
+func ProcessIdToSessionId(pid uint32, session *uint32) error {
+	_, err := ok(procProcessIdToSessionId, uintptr(pid), uintptr(unsafe.Pointer(session)))
+	return err
 }

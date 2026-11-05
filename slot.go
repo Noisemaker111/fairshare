@@ -190,6 +190,11 @@ func cmdSlot(args []string) int {
 		return 2
 	}
 	signal.Ignore(os.Interrupt) // the command gets Ctrl+C itself; we wait for it and pass on its code
+	endWithCaller("slot")
+	// Everything the command starts is in a job Windows kills when this process ends.
+	if job, err := killOnExitJob(); err == nil {
+		defer windows.CloseHandle(job)
+	}
 	text := strings.Join(args, " ")
 	cwd, _ := os.Getwd()
 	s, err := acquireSlot(text, cwd, "", maxWait, func(m string) { fmt.Fprintln(os.Stderr, m) })
