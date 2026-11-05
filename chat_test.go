@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // The process layout seen on this PC: T3 Code's main process, its server, the sessions the server
 // starts (any provider) and T3's own helpers, plus an agent started from a terminal.
@@ -37,12 +40,42 @@ func TestChatRule(t *testing.T) {
 		503: 502,
 		300: 0, 220: 0, 201: 0, 210: 0, 200: 0, 502: 0, 501: 0, 600: 0, 700: 0, 800: 0,
 	} {
-		if got := r.of(pid, procs); got != want {
+		if got := r.of(pid, inSnapshot(procs)); got != want {
 			t.Errorf("chat of %d %s = %d, want %d", pid, procs[pid].name, got, want)
 		}
 	}
 	r.only = map[uint32]bool{302: true}
-	if got := r.of(304, procs); got != 302 {
+	if got := r.of(304, inSnapshot(procs)); got != 302 {
 		t.Errorf("--pid 302: chat of 304 = %d", got)
+	}
+}
+
+// The hook looks up its own ancestors one by one; each must read exactly as adopt's snapshot does,
+// or a call would be tied to a different chat than the lane its work runs in.
+func TestLiveProcMatchesSnapshot(t *testing.T) {
+	procs := snapshot()
+	pid, checked := uint32(os.Getpid()), 0
+	for range 8 {
+		want, ok := procs[pid]
+		if !ok {
+			break
+		}
+		got, ok := liveProc(pid)
+		if !ok {
+			break // a protected or exited ancestor; the walk stops there in both
+		}
+		if got != want {
+			t.Errorf("pid %d: live %+v, snapshot %+v", pid, got, want)
+		}
+		checked++
+		pid = want.ppid
+	}
+	if checked < 2 {
+		t.Fatalf("only %d processes compared", checked)
+	}
+	r := newChatRule(defaultHosts, defaultHarness)
+	self := uint32(os.Getpid())
+	if a, b := r.of(self, liveProc), r.of(self, inSnapshot(procs)); a != b {
+		t.Errorf("chat of this test: live %d, snapshot %d", a, b)
 	}
 }

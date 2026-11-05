@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // du reports how much disk a set of folders really uses: a file hardlinked from many places (as

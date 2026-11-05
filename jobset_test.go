@@ -10,7 +10,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 const createBreakawayFromJob = 0x01000000

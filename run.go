@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"strings"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 func cmdRun(args []string) int {

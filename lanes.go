@@ -19,7 +19,7 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 func cmdSpin(args []string) int {

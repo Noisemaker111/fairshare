@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // adopt makes every agent session's work fair without changing the agents: it watches for
@@ -218,7 +218,7 @@ func cmdAdopt(args []string) int {
 		slices.SortFunc(fresh, func(a, b uint32) int { return cmp.Compare(procs[a].created, procs[b].created) })
 		for _, pid := range fresh {
 			info := procs[pid]
-			chat := rule.of(pid, procs)
+			chat := rule.of(pid, inSnapshot(procs))
 			if chat == 0 {
 				continue
 			}

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // A suspended chat looks hung to whoever is using it, so freezing is opt-in. With memory faked to

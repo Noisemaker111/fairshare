@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 const adoptTask = "fairshare"

@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"golang.org/x/sys/windows"
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // codexTrustHash is sha256 over the sorted-key JSON of the normalized hook identity
