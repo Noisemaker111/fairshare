@@ -34,6 +34,7 @@ func cmdRun(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: fairshare run [flags] -- command args...")
 		return 2
 	}
+	endWithCaller("run")
 
 	p := DefaultPolicy()
 	p.IOPriority, p.MemPriority, p.JobMemoryMB = *ioPri, *memPri, *memLimit
