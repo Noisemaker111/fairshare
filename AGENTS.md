@@ -23,7 +23,10 @@ memory freezing both suspend processes, so use `--pairs 0` when testing memory f
 
 The thread shell is live: `fairshare install` puts `%LOCALAPPDATA%\fairshare\bin\fairshare.exe
 hook` in every Claude Code, Codex and OpenCode chat, and keeps that copy's `adopt` running for the
-whole PC (scheduled task `fairshare`). Rebuilding `fairshare.exe` here doesn't change either; run
+whole PC (scheduled task `fairshare`). Claude and Codex chats read hooks from their config folder,
+and T3 Code starts them from their own (`homePath` in `~/.t3/userdata/settings.json`, such as
+`~/.claude-hub`), so install registers in each of those as well as `~/.claude` and `~/.codex`. A test
+that runs install sets `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, or it writes into the PC's real ones. Rebuilding `fairshare.exe` here doesn't change either; run
 `fairshare install` again to ship a change, then `fairshare throttle` to see adopt's chats.
 
 Tests run while that adopt governs this PC, including the test processes themselves; they must
