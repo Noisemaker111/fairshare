@@ -9,13 +9,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 func cmdRun(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	normal := fs.Bool("normal", false, "keep normal priority (still cleans up the whole tree on exit)")
+	normal := fs.Bool("normal", false, "run the command at normal priority, outside this chat's lane, for measurements that need it (still ends the whole tree on exit)")
 	memLimit := fs.Uint64("mem-limit", 0, "fail this run if its whole tree commits more than this many MB (0 = none)")
 	freeze := fs.Bool("freeze", false, "suspend this run while memory is short (off: it is only lowered in priority)")
 	freezeBelow := fs.Uint64("freeze-below", freezeBelowMB, "with --freeze: suspend when free RAM or free commit falls below this many MB")
@@ -38,12 +40,17 @@ func cmdRun(args []string) int {
 	if *freeze {
 		p = p.withFreezing(*freezeBelow, *resumeAbove)
 	}
+	var gov *Governor
+	var unit *Unit
+	var err error
 	if *normal {
-		p.PriorityClass, p.IOPriority, p.MemPriority = 0, -1, -1
-		p.FreezeBelowMB = 0
-	}
-	gov, unit, err := enterUnit(p)
-	if err != nil {
+		// fairshare itself stays where it is; only the command leaves the chat's lane (startNormal)
+		p = Policy{IOPriority: -1, MemPriority: -1, JobMemoryMB: *memLimit}
+		if gov, err = NewGovernor(p, nil); err != nil {
+			fmt.Fprintln(os.Stderr, "fairshare:", err)
+			return 1
+		}
+	} else if gov, unit, err = enterUnit(p); err != nil {
 		fmt.Fprintln(os.Stderr, "fairshare:", err, "(running without it)")
 	}
 	signal.Ignore(os.Interrupt) // the child gets Ctrl+C itself; we wait for it and pass on its code
@@ -51,7 +58,18 @@ func cmdRun(args []string) int {
 	execute := func(stdout, stderr io.Writer) int {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
-		err := cmd.Run()
+		if *normal {
+			u, err := startNormal(gov, cmd)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "fairshare run --normal:", err)
+				return 127
+			}
+			unit = u
+		} else if err := cmd.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "fairshare:", err)
+			return 127
+		}
+		err := cmd.Wait()
 		var exit *exec.ExitError
 		switch {
 		case err == nil:
@@ -102,6 +120,78 @@ func enterUnit(p Policy) (*Governor, *Unit, error) {
 		return nil, nil, fmt.Errorf("join job: %w", err)
 	}
 	return gov, u, nil
+}
+
+// startNormal starts cmd at normal priority, the way a person starting it would get it. Inside a
+// chat's lane that takes leaving the lane: the lane's job holds every process in it at idle
+// priority, and a job's priority limit also binds every job nested in it, so no job fairshare makes
+// there can raise anything. So the command starts as a child of the user's shell (explorer.exe),
+// which is in no lane and no chat, so adopt never takes it or what it starts. It starts suspended,
+// goes into a job of this run's that Windows kills when this process ends, gets normal CPU, disk and
+// memory priority, and only then runs. A command that still is not at normal priority is ended and
+// reported, never run at a priority it did not ask for.
+func startNormal(gov *Governor, cmd *exec.Cmd) (*Unit, error) {
+	attr := &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_NO_WINDOW}
+	if shell := openUserShell(); shell != 0 {
+		defer windows.CloseHandle(shell)
+		attr.ParentProcess = syscall.Handle(shell)
+	}
+	cmd.SysProcAttr = attr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	pid := uint32(cmd.Process.Pid)
+	fail := func(err error) (*Unit, error) {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return nil, err
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_SET_INFORMATION|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return fail(fmt.Errorf("open %d: %w", pid, err))
+	}
+	defer windows.CloseHandle(h)
+	u, err := gov.NewUnit(true, "")
+	if err != nil {
+		return fail(err)
+	}
+	if err := windows.AssignProcessToJobObject(u.Job, h); err != nil {
+		return fail(fmt.Errorf("join job: %w", err))
+	}
+	if err := windows.SetPriorityClass(h, windows.NORMAL_PRIORITY_CLASS); err != nil {
+		return fail(fmt.Errorf("set priority: %w", err))
+	}
+	ioNormal, memNormal := uint32(2), uint32(5)
+	ntSetInformationProcess.Call(uintptr(h), processIoPriority, uintptr(unsafe.Pointer(&ioNormal)), 4)
+	setProcessInformation.Call(uintptr(h), processMemoryPriority, uintptr(unsafe.Pointer(&memNormal)), 4)
+	if got := priorityName(pid); got != "normal" {
+		return fail(fmt.Errorf("%s still runs at %s priority (is this shell in a job that forbids leaving it?)", cmd.Path, got))
+	}
+	if !setSuspended(pid, ntResumeProcess) {
+		return fail(fmt.Errorf("resume %d failed", pid))
+	}
+	return u, nil
+}
+
+// openUserShell opens this session's explorer.exe with the rights to start a process under it, or
+// returns 0 when there is none (then the command starts under fairshare, and still must reach normal
+// priority or fail).
+func openUserShell() windows.Handle {
+	var session uint32
+	windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session)
+	for pid, p := range snapshot() {
+		if p.name != "explorer.exe" {
+			continue
+		}
+		var s uint32
+		if windows.ProcessIdToSessionId(pid, &s) != nil || s != session {
+			continue
+		}
+		if h, err := windows.OpenProcess(windows.PROCESS_CREATE_PROCESS|windows.PROCESS_DUP_HANDLE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid); err == nil {
+			return h
+		}
+	}
+	return 0
 }
 
 // priorityName is used by the self-check to show what Windows actually applied.

@@ -54,7 +54,7 @@ func TestThrottleCapsAChatAcrossItsJobs(t *testing.T) {
 	bin := fairshareBin(t)
 	dir := t.TempDir()
 	env := append(os.Environ(), "FAIRSHARE_EVENTS="+filepath.Join(dir, "events.jsonl"))
-	c := exec.Command("cmd", "/c", fmt.Sprintf("%s run --normal -- %s spin 8 12", bin, bin))
+	c := exec.Command("cmd", "/c", fmt.Sprintf("%s run -- %s spin 8 12", bin, bin))
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestThrottleCapsAChatAcrossItsJobs(t *testing.T) {
 // the second must live on: the chat's job must not have been nested inside the first run's.
 func TestOneRunEndingDoesNotKillTheChatsOtherWork(t *testing.T) {
 	bin := fairshareBin(t)
-	c := exec.Command("cmd", "/c", fmt.Sprintf("start /b %s run --normal -- %s spin 1 4 & ping -n 2 127.0.0.1 >nul & ping -n 8 127.0.0.1 >nul", bin, bin))
+	c := exec.Command("cmd", "/c", fmt.Sprintf("start /b %s run -- %s spin 1 4 & ping -n 2 127.0.0.1 >nul & ping -n 8 127.0.0.1 >nul", bin, bin))
 	t0 := time.Now()
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
