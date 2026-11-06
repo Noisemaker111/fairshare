@@ -15,7 +15,9 @@ type Segment struct {
 	Sep  string
 }
 
-func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' }
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+}
 
 // segments splits at top-level `;`, `&&`, `||` and newlines, respecting quotes, braces and parens.
 func segments(cmd string) []Segment {
@@ -204,4 +206,102 @@ func join(segs []Segment) string {
 		b.WriteString(s.Sep)
 	}
 	return b.String()
+}
+
+// rgValueFlags are the rg options whose value is the next word.
+var rgValueFlags = map[string]bool{
+	"-g": true, "--glob": true, "--iglob": true, "-t": true, "--type": true, "-T": true, "--type-not": true,
+	"-e": true, "--regexp": true, "-f": true, "--file": true, "-m": true, "--max-count": true,
+	"-A": true, "--after-context": true, "-B": true, "--before-context": true, "-C": true, "--context": true,
+	"-M": true, "--max-columns": true, "-j": true, "--threads": true, "-E": true, "--encoding": true,
+	"-d": true, "--max-depth": true, "--sort": true, "--sortr": true, "-r": true, "--replace": true,
+	"--type-add": true, "--colors": true, "--pre": true, "--max-filesize": true, "--path-separator": true,
+}
+
+// rgShellGlobs rewrites the unquoted path globs of an rg command for PowerShell, which passes
+// `scripts/*.ts` to rg as a literal file name (os error 123), into rg's own glob filter:
+// `rg pat scripts/*.ts` becomes `rg -g '*.ts' pat scripts`. 97 Codex calls hit this in two weeks.
+func rgShellGlobs(seg string) (string, bool) {
+	toks := quotedWords(seg)
+	if len(toks) < 2 || toks[0] != "rg" {
+		return seg, false
+	}
+	patternGiven, positional, skip := false, 0, false
+	var globs []string
+	out := []string{"rg"}
+	bases := map[string]bool{}
+	for _, tok := range toks[1:] {
+		if skip {
+			skip = false
+			out = append(out, tok)
+			continue
+		}
+		if tok == "--" || strings.HasPrefix(tok, "-") {
+			if rgValueFlags[tok] {
+				skip = true
+			}
+			if tok == "-e" || tok == "--regexp" || tok == "-f" || tok == "--file" || strings.HasPrefix(tok, "--regexp=") || strings.HasPrefix(tok, "--file=") {
+				patternGiven = true
+			}
+			out = append(out, tok)
+			continue
+		}
+		positional++
+		if (positional == 1 && !patternGiven) || !strings.ContainsAny(tok, "*?") || strings.ContainsAny(tok, `'"$`+"`") {
+			out = append(out, tok)
+			continue
+		}
+		segs := strings.FieldsFunc(tok, func(r rune) bool { return r == '/' || r == '\\' })
+		cut := 0
+		for cut < len(segs) && !strings.ContainsAny(segs[cut], "*?") {
+			cut++
+		}
+		base := strings.Join(segs[:cut], "/")
+		if base == "" {
+			base = "."
+		}
+		if strings.HasPrefix(tok, "/") || strings.HasPrefix(tok, `\`) {
+			base = "/" + base
+		}
+		globs = append(globs, "-g", "'"+strings.Join(segs[cut:], "/")+"'")
+		if !bases[base] {
+			bases[base] = true
+			out = append(out, base)
+		}
+	}
+	if len(globs) == 0 {
+		return seg, false
+	}
+	lead := seg[:len(seg)-len(strings.TrimLeft(seg, " \t"))]
+	trail := seg[len(strings.TrimRight(seg, " \t")):]
+	return lead + strings.Join(append(append([]string{"rg"}, globs...), out[1:]...), " ") + trail, true
+}
+
+// quotedWords splits a simple command on unquoted whitespace and keeps each word's quotes.
+func quotedWords(seg string) []string {
+	var w []string
+	var cur strings.Builder
+	var q byte
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case q != 0:
+			if c == q {
+				q = 0
+			}
+		case c == '\'' || c == '"':
+			q = c
+		case isSpace(c):
+			if cur.Len() > 0 {
+				w = append(w, cur.String())
+				cur.Reset()
+			}
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	if cur.Len() > 0 {
+		w = append(w, cur.String())
+	}
+	return w
 }

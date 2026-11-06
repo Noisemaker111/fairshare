@@ -135,7 +135,9 @@ func nearby(abs string) []string {
 		return nil
 	}
 	// NTFS lists names in upper-case order; keep it, so ties come out as File Explorer shows them.
-	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(strings.ToUpper(a.Name()), strings.ToUpper(b.Name())) })
+	slices.SortFunc(entries, func(a, b os.DirEntry) int {
+		return strings.Compare(strings.ToUpper(a.Name()), strings.ToUpper(b.Name()))
+	})
 	base := strings.ToLower(filepath.Base(abs))
 	type scored struct {
 		name  string
@@ -754,6 +756,17 @@ func decide(c Call) Decision {
 			if joined := strings.Join(parts, "|"); joined != body {
 				body = joined
 				rules.add("pwsh-dialect")
+			}
+			parts = pipes(body)
+			globbed := false
+			for i, p := range parts {
+				if q, ok := rgShellGlobs(p); ok {
+					parts[i], globbed = q, true
+				}
+			}
+			if globbed {
+				body = strings.Join(parts, "|")
+				rules.add("rg-glob")
 			}
 		} else {
 			// Unquoted Windows paths lose their backslashes in bash: C:\Users\x becomes C:Usersx.
