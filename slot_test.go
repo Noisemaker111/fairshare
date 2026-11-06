@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,38 @@ func TestOlderSlotWaiterStartsBeforeNewArrival(t *testing.T) {
 	second.slot.Close()
 	if first.name != "older" {
 		t.Fatalf("%s took the slot ahead of the already-waiting %s", first.name, second.name)
+	}
+}
+
+func TestSlotQueueErrorIsNotReportedAsAWaitTimeout(t *testing.T) {
+	if os.Getenv("FAIRSHARE_TEST_SLOT_FAILURE") == "1" {
+		os.Exit(cmdSlot([]string{"cmd", "/c", "exit", "0"}))
+	}
+	root := t.TempDir()
+	t.Setenv("LOCALAPPDATA", root)
+	t.Setenv(heldEnv, "")
+	if err := os.WriteFile(filepath.Join(root, "fairshare"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestSlotQueueErrorIsNotReportedAsAWaitTimeout$")
+	child.Env = append(os.Environ(), "FAIRSHARE_TEST_SLOT_FAILURE=1")
+	out, err := child.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || !strings.Contains(string(out), "queue") {
+		t.Fatalf("queue setup failure should exit 1 and name the queue: %v, %s", err, out)
+	}
+}
+
+func TestSlotPassesChildExitStatus(t *testing.T) {
+	if os.Getenv("FAIRSHARE_TEST_SLOT_EXIT") == "1" {
+		os.Exit(cmdSlot([]string{"cmd", "/c", "exit", "7"}))
+	}
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv(heldEnv, "")
+	child := exec.Command(os.Args[0], "-test.run=^TestSlotPassesChildExitStatus$")
+	child.Env = append(os.Environ(), "FAIRSHARE_TEST_SLOT_EXIT=1")
+	out, err := child.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 7 {
+		t.Fatalf("slot should return its child's exit 7: %v, %s", err, out)
 	}
 }
 

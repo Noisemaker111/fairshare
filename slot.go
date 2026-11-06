@@ -228,13 +228,20 @@ func cmdSlot(args []string) int {
 	signal.Ignore(os.Interrupt) // the command gets Ctrl+C itself; we wait for it and pass on its code
 	endWithCaller("slot")
 	// Everything the command starts is in a job Windows kills when this process ends.
-	if job, err := killOnExitJob(); err == nil {
-		defer windows.CloseHandle(job)
+	if job, err := killOnExitJob(); err != nil && job != 0 {
+		windows.CloseHandle(job)
 	}
+	// The job contains this process. Let the OS close its handle at process exit;
+	// closing it here kills this process before it can return the child's status.
 	text := strings.Join(args, " ")
 	cwd, _ := os.Getwd()
 	s, err := acquireSlot(text, cwd, "", maxWait, func(m string) { fmt.Fprintln(os.Stderr, m) })
 	if err != nil {
+		if !errors.Is(err, errBusy) {
+			fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
+			logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "queue-error"})
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "[fairshare] not started: no heavy-job slot came free in %s. Run it with run_in_background (it then waits as long as it takes), or narrow it to the files you changed.\n", maxWait.Round(time.Second))
 		logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "no-slot", "waited_ms": maxWait.Milliseconds()})
 		return 124
