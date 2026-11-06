@@ -148,22 +148,57 @@ func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string
 	if os.Getenv(heldEnv) != "" {
 		return &heavySlot{}, nil
 	}
-	os.MkdirAll(slotsDir(), 0o755)
+	if err := os.MkdirAll(slotsDir(), 0o755); err != nil {
+		return nil, err
+	}
 	start := time.Now()
+	ticket, err := newSlotTicket(start, maxWait)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if ticket.file != nil {
+			if gate, err := lockSlotQueue(time.Now(), 0); err == nil {
+				_ = ticket.remove()
+				gate.Close()
+			} else {
+				_ = ticket.file.Close()
+				ticket.file = nil
+			}
+		}
+	}()
 	told := false
 	for {
-		for i := range slotCount() {
-			f := trySlot(i)
-			if f == nil {
-				continue
-			}
-			f.Truncate(0)
-			b, _ := json.Marshal(slotHolder{PID: os.Getpid(), Cmd: cmd, Cwd: cwd, Label: label, Since: time.Now().Format(time.RFC3339)})
-			f.WriteAt(b, 0)
-			return &heavySlot{f: f, Waited: time.Since(start)}, nil
+		gate, err := lockSlotQueue(start, maxWait)
+		if err != nil {
+			return nil, err
 		}
+		live, err := liveSlotTickets()
+		if err != nil {
+			gate.Close()
+			return nil, err
+		}
+		if len(live) > 0 && live[0] == ticket.name {
+			for i := range slotCount() {
+				f := trySlot(i)
+				if f == nil {
+					continue
+				}
+				f.Truncate(0)
+				b, _ := json.Marshal(slotHolder{PID: os.Getpid(), Cmd: cmd, Cwd: cwd, Label: label, Since: time.Now().Format(time.RFC3339)})
+				f.WriteAt(b, 0)
+				if err := ticket.remove(); err != nil {
+					f.Close()
+					gate.Close()
+					return nil, err
+				}
+				gate.Close()
+				return &heavySlot{f: f, Waited: time.Since(start)}, nil
+			}
+		}
+		gate.Close()
 		if !told && note != nil {
-			note(fmt.Sprintf("[fairshare] waiting for a heavy-job slot: the PC already runs %d whole suites or checks (%s). One test file or package never waits.", slotCount(), describeHolders(slotHolders())))
+			note(fmt.Sprintf("[fairshare] waiting its turn for a heavy-job slot (current holders: %s). One test file or package never waits.", describeHolders(slotHolders())))
 			told = true
 		}
 		if maxWait > 0 && time.Since(start) >= maxWait {
