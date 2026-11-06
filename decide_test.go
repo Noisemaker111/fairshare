@@ -247,6 +247,37 @@ func TestRgLinesCappedOnlyWhereAPersonReads(t *testing.T) {
 	match(t, testCall(t, dir, "rg -n foo src | rg -v bar", "pwsh", "codex", nil).Command, `^rg -n foo src \|`)
 }
 
+func TestRgPathGlobsBecomeRgGlobsInPowerShell(t *testing.T) {
+	cases := map[string]string{
+		"rg -n foo scripts/*.ts":              "rg -g '*.ts' -n foo scripts",
+		"rg foo *.go":                         "rg -g '*.go' foo .",
+		`rg -n "a b" src/**/x*.ts docs`:       `rg -g '**/x*.ts' -n "a b" src docs`,
+		"rg -e foo -e bar internal\\a\\*.go":  "rg -g '*.go' -e foo -e bar internal/a",
+		"rg -g '*.md' foo docs":               "",
+		"rg 'fo*o' src":                       "",
+		"rg -n foo src":                       "",
+		"rg foo 'scripts/*.ts'":               "",
+		"rg -t go fo? cmd/*.go cmd/*_test.go": "rg -g '*.go' -g '*_test.go' -t go fo? cmd",
+	}
+	for in, want := range cases {
+		got, ok := rgShellGlobs(in)
+		if want == "" {
+			if ok || got != in {
+				t.Errorf("%q must stay as it is, got %q", in, got)
+			}
+			continue
+		}
+		if !ok || got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+	d := testCall(t, t.TempDir(), "rg -n foo scripts/*.ts | Select-Object -First 5", "pwsh", "codex", nil)
+	match(t, d.Command, `-g '\*\.ts' -n foo scripts \|`)
+	if d := testCall(t, t.TempDir(), "rg -n foo scripts/*.ts", "bash", "claude", nil); strings.Contains(d.Command, "-g '*.ts'") {
+		t.Errorf("bash expands globs itself; got %q", d.Command)
+	}
+}
+
 func TestUnquotedWindowsPathsInBash(t *testing.T) {
 	match(t, testCall(t, t.TempDir(), `ls C:\Users\Jk101\Projects`, "bash", "claude", nil).Command, `C:/Users/Jk101/Projects`)
 }
