@@ -40,6 +40,27 @@ func TestWholeSuitesOutsideTheRunnerWaitForASlot(t *testing.T) {
 	}
 }
 
+func TestBackgroundGateAfterShellPreparationGetsASlot(t *testing.T) {
+	dir := t.TempDir()
+	command := `git rev-parse HEAD && git status --short | wc -l && bun run verify:smoke > .scratch-gate.log 2>&1; echo "exit=$?" >> .scratch-gate.log`
+	d := testCall(t, dir, command, "bash", "claude", map[string]any{"run_in_background": true, "timeout": 3600000.0})
+	if !slicesContains(d.Rules, "heavy-slot") || !strings.Contains(d.Command, " slot bun run verify:smoke > .scratch-gate.log 2>&1") {
+		t.Fatalf("background gate bypassed the heavy-job slot: %+v", d)
+	}
+}
+
+func TestVerificationPlanAndScenarioListDoNotWaitForAHeavySlot(t *testing.T) {
+	dir := t.TempDir()
+	for _, command := range []string{"bun run verify:smoke --plan", "bun run smoke:ci --list"} {
+		for _, background := range []bool{false, true} {
+			d := testCall(t, dir, command, "bash", "claude", map[string]any{"run_in_background": background})
+			if slicesContains(d.Rules, "heavy-slot") || slicesContains(d.Rules, "long-run") {
+				t.Errorf("read-only gate discovery waited for a heavy slot: %s: %+v", command, d)
+			}
+		}
+	}
+}
+
 func TestSlotsAreLimitedAndComeBackWhenReleased(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "2")

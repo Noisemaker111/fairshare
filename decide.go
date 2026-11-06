@@ -71,7 +71,9 @@ func set(xs ...string) map[string]bool {
 	return m
 }
 
-func isLongRun(s string) bool { return longRun.MatchString(s) && !server.MatchString(s) }
+func isLongRun(s string) bool {
+	return longRun.MatchString(s) && !server.MatchString(s) && !discoveryRun.MatchString(s)
+}
 
 func homeDir() string {
 	for _, k := range []string{"USERPROFILE", "HOME"} {

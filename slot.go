@@ -34,15 +34,16 @@ var (
 	goRun      = regexp.MustCompile(`^go\s`)
 	goTargeted = regexp.MustCompile(`\s-run[\s=]`)
 	// heavyExtra: whole checks whose names say nothing longRun knows.
-	heavyExtra = regexp.MustCompile(`^(?:bun|npm|pnpm)\s+run\s+(?:lane:close|smoke\S*|perf\S*|bench\S*)(?:\s|$)|^node\s+\S*check\.mjs\b`)
-	leadAssign = regexp.MustCompile(`^\w+=`)
+	heavyExtra   = regexp.MustCompile(`^(?:bun|npm|pnpm)\s+run\s+(?:lane:close|smoke\S*|perf\S*|bench\S*)(?:\s|$)|^node\s+\S*check\.mjs\b`)
+	discoveryRun = regexp.MustCompile(`^(?:bun|npm|pnpm)\s+run\s+(?:verify(?::smoke)?\s+--plan|smoke:ci\s+--list)(?:\s|$)`)
+	leadAssign   = regexp.MustCompile(`^\w+=`)
 )
 
 // heavyRun is a command that loads the whole PC: a whole suite, build or check. One test file,
 // one Go package or one -run filter is light, and installs are short; those never wait.
 func heavyRun(s string) bool {
 	s = strings.TrimSpace(s)
-	if server.MatchString(s) || installRun.MatchString(s) || singleTest.MatchString(s) {
+	if discoveryRun.MatchString(s) || server.MatchString(s) || installRun.MatchString(s) || singleTest.MatchString(s) {
 		return false
 	}
 	if goRun.MatchString(s) && (!strings.Contains(s, "./...") || goTargeted.MatchString(s)) {
