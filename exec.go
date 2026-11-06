@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -233,6 +234,11 @@ func cmdExec(args []string) int {
 		cwd, _ := os.Getwd()
 		s, err := acquireSlot(cmdText, cwd, label, limit/2, func(m string) { out.Write([]byte(m + "\n")) })
 		if err != nil {
+			if !errors.Is(err, errBusy) {
+				fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
+				logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 1, "stopped": "queue-error"})
+				return 1
+			}
 			os.Stdout.WriteString(fmt.Sprintf("[fairshare] not started: %s within %s; the PC already runs %d whole suites or checks (%s). Run it with run_in_background, where it waits its turn, or narrow it to one test file or package.\n",
 				errBusy, (limit / 2).Round(time.Second), slotCount(), describeHolders(slotHolders())))
 			logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 124, "stopped": "no-slot", "waited_ms": (limit / 2).Milliseconds()})
