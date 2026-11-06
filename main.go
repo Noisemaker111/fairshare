@@ -114,7 +114,8 @@ func cmdInspect() int {
 	var io, mem uint32
 	ntQueryInformationProcess.Call(uintptr(windows.CurrentProcess()), processIoPriority, uintptr(unsafe.Pointer(&io)), 4, 0)
 	getProcessInformation.Call(uintptr(windows.CurrentProcess()), processMemoryPriority, uintptr(unsafe.Pointer(&mem)), 4)
-	fmt.Printf("pid=%d priority=%s io=%d mem=%d\n", pid, priorityName(pid), io, mem)
+	desktop, _ := windows.ChildDesktop()
+	fmt.Printf("pid=%d priority=%s io=%d mem=%d desktop=%s\n", pid, priorityName(pid), io, mem, desktop)
 	var procMask, sysMask uintptr
 	kernel32.NewProc("GetProcessAffinityMask").Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&procMask)), uintptr(unsafe.Pointer(&sysMask)))
 	fmt.Printf("affinity=%#x of %#x\n", procMask, sysMask)

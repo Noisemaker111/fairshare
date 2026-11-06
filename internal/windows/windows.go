@@ -176,6 +176,10 @@ var (
 	procNtQueryInformationProcess    = ntdll.NewProc("NtQueryInformationProcess")
 	procWaitForMultipleObjects       = kernel32.NewProc("WaitForMultipleObjects")
 	procProcessIdToSessionId         = kernel32.NewProc("ProcessIdToSessionId")
+
+	// user32 loads only on a desktop call (run --normal), never in the hook.
+	user32             = syscall.NewLazyDLL("user32.dll") // a known DLL, like kernel32
+	procCreateDesktopW = user32.NewProc("CreateDesktopW")
 )
 
 // NewLazySystemDLL loads name from System32 only, never from the current or program folder.
@@ -361,4 +365,67 @@ func WaitForMultipleObjects(handles []Handle, waitAll bool, ms uint32) (uint32, 
 func ProcessIdToSessionId(pid uint32, session *uint32) error {
 	_, err := ok(procProcessIdToSessionId, uintptr(pid), uintptr(unsafe.Pointer(session)))
 	return err
+}
+
+// CreateDesktop makes (or opens, if the name exists) a desktop on the calling process's window
+// station. Nothing on it is ever shown on the screen, and its windows cannot take the screen's focus.
+// It lasts while this handle or a thread on it does.
+func CreateDesktop(name string) (Handle, error) {
+	p, err := UTF16PtrFromString(name)
+	if err != nil {
+		return 0, err
+	}
+	return handle(procCreateDesktopW, false, uintptr(unsafe.Pointer(p)), 0, 0, 0, GENERIC_ALL, 0)
+}
+
+// unicodeString is Windows' UNICODE_STRING.
+type unicodeString struct {
+	Length, MaximumLength uint16
+	Buffer                *uint16
+}
+
+// desktopInfo is this process's RTL_USER_PROCESS_PARAMETERS.DesktopInfo ("WinSta0\Default"): the
+// desktop CreateProcess gives a child whose STARTUPINFO names none (Go's exec never names one).
+// The offsets are the 64-bit PEB's (ProcessParameters at 0x20, DesktopInfo at 0xC0), stable since
+// Windows XP x64.
+func desktopInfo() (*unicodeString, error) {
+	var pbi PROCESS_BASIC_INFORMATION
+	var n uint32
+	if err := NtQueryInformationProcess(CurrentProcess(), 0, unsafe.Pointer(&pbi), uint32(unsafe.Sizeof(pbi)), &n); err != nil {
+		return nil, err
+	}
+	paramsAt := pbi.PebBaseAddress + 0x20
+	params := **(**uintptr)(unsafe.Pointer(&paramsAt))
+	infoAt := params + 0xC0
+	info := *(**unicodeString)(unsafe.Pointer(&infoAt))
+	if info.Length%2 != 0 || info.Length > info.MaximumLength || info.Length > 1024 || info.Length > 0 && info.Buffer == nil {
+		return nil, syscall.EINVAL
+	}
+	return info, nil
+}
+
+// ChildDesktop reads the desktop ("WinSta0\Default") a process this one starts would be given.
+func ChildDesktop() (string, error) {
+	info, err := desktopInfo()
+	if err != nil || info.Length == 0 {
+		return "", err
+	}
+	return UTF16ToString(unsafe.Slice(info.Buffer, info.Length/2)), nil
+}
+
+// WithChildDesktop runs start with the desktop of processes this one starts set to desktop
+// ("WinSta0\name"), then sets it back. Run nothing else that starts processes meanwhile.
+func WithChildDesktop(desktop string, start func() error) error {
+	info, err := desktopInfo()
+	if err != nil {
+		return err
+	}
+	s, err := syscall.UTF16FromString(desktop)
+	if err != nil {
+		return err
+	}
+	saved := *info
+	*info = unicodeString{Length: uint16(2 * (len(s) - 1)), MaximumLength: uint16(2 * len(s)), Buffer: &s[0]}
+	defer func() { *info = saved }()
+	return start()
 }

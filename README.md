@@ -73,13 +73,15 @@ fairshare report --hours 24              what every chat ran, waited on, cost an
 fairshare run -- bun run test            one command (and all it starts) as fair agent work
 fairshare run --cache -- bun run check   ...and once per code state across all sessions
 fairshare run --normal -- strobe record …  a measurement at normal priority, outside the chat's lane (strobe
-                                         refuses frame and input-latency metrics at idle priority)
+                                         refuses frame and input-latency metrics at idle priority), on a
+                                         private desktop: the browser windows it opens are never on screen
+                                         and never take a game's focus
 fairshare probe --secs 10                how a game-like foreground app is doing right now
 fairshare bench --jobs 50 --mode plain   50 heavy synthetic jobs against the probe (or --mode fair)
 fairshare bench lanes                    a 48-thread chat against a 2-thread one, under each way of sharing
 fairshare ceiling --what idle|spawn      how many idle processes / starts per second the PC takes
 fairshare du <folders>                   real disk use, counting hardlinked files once
-fairshare inspect                        the priorities Windows gave this process
+fairshare inspect                        the priorities and desktop Windows gave this process
 fairshare slot bun run check             run it once a heavy-job slot is free (the hook adds this)
 ```
 
