@@ -108,6 +108,92 @@ func TestSlotsAreLimitedAndComeBackWhenReleased(t *testing.T) {
 	}
 }
 
+func TestOlderSlotWaiterStartsBeforeNewArrival(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "1")
+	t.Setenv(heldEnv, "")
+	holder, err := acquireSlot("holding", "C:/repo", "", time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquired struct {
+		name string
+		slot *heavySlot
+		err  error
+	}
+	ready := make(chan struct{})
+	results := make(chan acquired, 2)
+	go func() {
+		s, e := acquireSlot("older", "C:/repo", "", 10*time.Second, func(string) { close(ready) })
+		results <- acquired{"older", s, e}
+	}()
+	<-ready
+	holder.Close()
+	go func() {
+		s, e := acquireSlot("newer", "C:/repo", "", 10*time.Second, nil)
+		results <- acquired{"newer", s, e}
+	}()
+	first := <-results
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	first.slot.Close()
+	second := <-results
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	second.slot.Close()
+	if first.name != "older" {
+		t.Fatalf("%s took the slot ahead of the already-waiting %s", first.name, second.name)
+	}
+}
+
+func TestKilledSlotWaiterDoesNotBlockQueue(t *testing.T) {
+	if os.Getenv("FAIRSHARE_TEST_WAIT_SLOT") == "1" {
+		_, _ = acquireSlot("abandoned", "C:/repo", "", 0, func(string) { _, _ = os.Stdout.WriteString("waiting\n") })
+		os.Exit(0)
+	}
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "1")
+	t.Setenv(heldEnv, "")
+	holder, err := acquireSlot("holding", "C:/repo", "", time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestKilledSlotWaiterDoesNotBlockQueue$")
+	child.Env = append(os.Environ(), "FAIRSHARE_TEST_WAIT_SLOT=1")
+	out, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	buf := make([]byte, 32)
+	n, _ := out.Read(buf)
+	if !strings.Contains(string(buf[:n]), "waiting") {
+		t.Fatalf("waiter did not queue: %q", buf[:n])
+	}
+	_ = child.Process.Kill()
+	_ = child.Wait()
+	holder.Close()
+	next, err := acquireSlot("next", "C:/repo", "", 3*time.Second, nil)
+	if err != nil {
+		t.Fatal("dead waiter blocked its successor:", err)
+	}
+	next.Close()
+	entries, err := os.ReadDir(slotsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".wait") {
+			t.Fatal("stale ticket:", entry.Name())
+		}
+	}
+}
+
 // A run that is killed while it holds a slot must not keep it.
 func TestAKilledHolderLosesItsSlot(t *testing.T) {
 	if os.Getenv("FAIRSHARE_TEST_HOLD_SLOT") == "1" {
