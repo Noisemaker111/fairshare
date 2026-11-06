@@ -29,3 +29,32 @@ func TestRunNormalLeavesTheIdleJobAroundIt(t *testing.T) {
 		t.Fatalf("plain run gave %q, want idle", first)
 	}
 }
+
+// Strobe's browser windows, started through `run --normal` from an agent's shell, once opened
+// jgengine games on Jon's screen and over his game. Started from the screen's desktop, the command
+// must begin on a private one; started from any other (an Owl drive desktop), it stays there.
+func TestRunNormalStartsOffScreen(t *testing.T) {
+	bin := fairshareBin(t)
+	desktop := func(args ...string) string {
+		out, err := exec.Command(bin, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		_, d, _ := strings.Cut(string(out), " desktop=")
+		d, _, _ = strings.Cut(d, "\n")
+		return strings.TrimSpace(d)
+	}
+	onScreen := func(d string) bool { return d == "" || strings.HasSuffix(strings.ToLower(d), `\default`) }
+	here := desktop("inspect")
+	got := desktop("run", "--normal", "--", bin, "inspect")
+	if onScreen(here) {
+		if onScreen(got) || !strings.Contains(got, `\fairshare-`) {
+			t.Fatalf("run --normal from the screen's desktop (%q) started its command on %q, want a private fairshare desktop", here, got)
+		}
+	} else if got != here {
+		t.Fatalf("run --normal from %q started its command on %q, want the same desktop", here, got)
+	}
+	if plain := desktop("run", "--", bin, "inspect"); plain != here {
+		t.Fatalf("plain run moved its command from %q to %q", here, plain)
+	}
+}

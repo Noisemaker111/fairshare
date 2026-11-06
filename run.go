@@ -131,6 +131,9 @@ func enterUnit(p Policy) (*Governor, *Unit, error) {
 // goes into a job of this run's that Windows kills when this process ends, gets normal CPU, disk and
 // memory priority, and only then runs. A command that still is not at normal priority is ended and
 // reported, never run at a priority it did not ask for.
+//
+// It also starts on a private desktop (startOffScreen): what a measurement opens, such as Strobe's
+// browser windows, never appears on Jon's screen or takes his game's focus.
 func startNormal(gov *Governor, cmd *exec.Cmd) (*Unit, error) {
 	attr := &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_NO_WINDOW}
 	if shell := openUserShell(); shell != 0 {
@@ -138,7 +141,7 @@ func startNormal(gov *Governor, cmd *exec.Cmd) (*Unit, error) {
 		attr.ParentProcess = syscall.Handle(shell)
 	}
 	cmd.SysProcAttr = attr
-	if err := cmd.Start(); err != nil {
+	if err := startOffScreen(cmd.Start); err != nil {
 		return nil, err
 	}
 	pid := uint32(cmd.Process.Pid)
@@ -172,6 +175,31 @@ func startNormal(gov *Governor, cmd *exec.Cmd) (*Unit, error) {
 		return fail(fmt.Errorf("resume %d failed", pid))
 	}
 	return u, nil
+}
+
+// startOffScreen calls start so the process it starts begins on a private desktop when this one's
+// children would begin on the screen's ("WinSta0\Default"). A process takes its creator's desktop
+// (explorer as its parent or not), and everything it starts takes that one in turn, so the whole
+// tree's windows are drawn where no one sees them and none can take the foreground. Started from
+// any other desktop (an Owl drive desktop already) it runs as is. The desktop stays open until this
+// fairshare exits, past the end of the command, which may still be starting up on it.
+func startOffScreen(start func() error) error {
+	child, err := windows.ChildDesktop()
+	if err != nil {
+		return fmt.Errorf("read this process's desktop: %w", err)
+	}
+	station, desk, found := strings.Cut(child, `\`)
+	if !found {
+		station, desk = "WinSta0", child
+	}
+	if desk != "" && !strings.EqualFold(desk, "Default") {
+		return start()
+	}
+	name := fmt.Sprintf("fairshare-%d", os.Getpid())
+	if _, err := windows.CreateDesktop(name); err != nil {
+		return fmt.Errorf("make a private desktop: %w", err)
+	}
+	return windows.WithChildDesktop(station+`\`+name, start)
 }
 
 // openUserShell opens this session's explorer.exe with the rights to start a process under it, or
