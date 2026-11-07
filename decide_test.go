@@ -120,6 +120,36 @@ func TestClaudeWaits(t *testing.T) {
 	}
 }
 
+// A loop or branch split at its `;` leaves segments that start with the shell's own words (do, done,
+// then, fi, else...). `slot` in front of one is a syntax error that breaks the whole command, as a
+// background `until grep ...; do sleep 10; done` wait did on 2026-11-07.
+func TestSlotNeverPrefixesShellKeywords(t *testing.T) {
+	dir := t.TempDir()
+	bg := map[string]any{"run_in_background": true}
+	for shell, cmds := range map[string][]string{
+		"bash": {
+			`until grep -q "^exit" a.log && grep -q "^exit" b.log; do sleep 10; done; echo AFG; tail -12 a.log`,
+			`while read -r f; do wc -l "$f"; done < list.txt`,
+			`if grep -q x a.log; then go test ./...; elif true; then make; else bun test; fi`,
+			`for f in a b; do go vet ./$f; done`,
+			`case $x in a) make ;; esac`,
+			`{ make; } > out.log`,
+		},
+		"pwsh": {
+			`if (Test-Path a) { go test ./... } else { go vet ./... }`,
+			`try { go build . } catch { Write-Output no } finally { Write-Output done }`,
+			`do { go test ./... } until ($?)`,
+		},
+	} {
+		for _, c := range cmds {
+			d := testCall(t, dir, c, shell, "claude", bg)
+			if regexp.MustCompile(`slot (?:--wait \d+ )?(?:do|done|then|elif|else|fi|esac|in|until|catch|finally|elseif|\}|\))(?:\s|$)`).MatchString(d.Command) {
+				t.Errorf("%s: slot put in front of a shell keyword:\n%s\n-> %s", shell, c, d.Command)
+			}
+		}
+	}
+}
+
 func TestEarlyReadWaitsInTheSameCall(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "tasks"), 0o755)

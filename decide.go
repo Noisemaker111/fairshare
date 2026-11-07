@@ -480,8 +480,10 @@ func (r *ruleSet) add(name string) {
 
 var (
 	// Words that are the shell's own, not a program `slot` could start, and sleep, which is a wait, not work.
-	builtinsBash = set("cd", "export", "source", ".", "echo", "printf", "set", "unset", "eval", "exec", "read", "test", "[", "[[", "if", "for", "while", "until", "case", "function", "{", "(", "!", "true", "false", ":", "wait", "kill", "trap", "local", "declare", "alias", "type", "command", "builtin", "pushd", "popd", "time", "exit", "return", "shift", "ulimit", "umask", "jobs", "fg", "bg", "disown", "hash", "history", "let", "sleep")
-	builtinsPwsh = set("cd", "echo", "cat", "ls", "dir", "rm", "del", "cp", "copy", "mv", "move", "pwd", "type", "gc", "gci", "gi", "sc", "ac", "where", "select", "sort", "kill", "ps", "sleep", "mkdir", "md", "rmdir", "rd", "clear", "cls", "man", "help", "foreach", "%", "?", "if", "for", "while", "switch", "function", "try", "exit", "return", "set", "start", "write", "tee", "measure", "diff", "iex", "(", "{", "[", "$", ".", "&")
+	// The keywords matter most: a loop or branch split at its `;` leaves segments that start with
+	// do, done, then or else, and `slot` in front of one is a syntax error for the whole command.
+	builtinsBash = set("cd", "export", "source", ".", "echo", "printf", "set", "unset", "eval", "exec", "read", "test", "[", "[[", "if", "then", "elif", "else", "fi", "for", "select", "while", "until", "do", "done", "case", "esac", "in", "function", "coproc", "{", "}", "(", ")", "!", "true", "false", ":", "wait", "kill", "trap", "local", "declare", "alias", "type", "command", "builtin", "pushd", "popd", "time", "exit", "return", "shift", "ulimit", "umask", "jobs", "fg", "bg", "disown", "hash", "history", "let", "sleep")
+	builtinsPwsh = set("cd", "echo", "cat", "ls", "dir", "rm", "del", "cp", "copy", "mv", "move", "pwd", "type", "gc", "gci", "gi", "sc", "ac", "where", "select", "sort", "kill", "ps", "sleep", "mkdir", "md", "rmdir", "rd", "clear", "cls", "man", "help", "foreach", "%", "?", "if", "elseif", "else", "for", "while", "do", "until", "switch", "function", "filter", "param", "begin", "process", "end", "try", "catch", "finally", "trap", "throw", "break", "continue", "exit", "return", "set", "start", "write", "tee", "measure", "diff", "iex", "(", ")", "{", "}", "[", "$", ".", "&")
 	verbNoun     = regexp.MustCompile(`^[A-Za-z]+-[A-Za-z]+$`) // a PowerShell cmdlet
 	writesFile   = regexp.MustCompile(`(?:^|[^&\d<>])\d?>>?\s*[^&\s]`)
 	toNowhere    = regexp.MustCompile(`\d?>>?\s*(?:/dev/null|\$null|NUL)\b`)
