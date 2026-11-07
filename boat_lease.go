@@ -93,16 +93,20 @@ func listedMachines() ([]string, error) {
 	return ids, nil
 }
 
-// boatRoom says whether one more machine fits: the other lease holders (each owns at most one
-// machine, created or on its way) plus listed machines no lease names must stay under the cap.
+// boatRoom says whether one more machine fits: the other holders let through to start (each owns
+// at most one machine, created or on its way) plus listed machines no lease names must stay under
+// the cap. A holder still waiting here owns no machine and is not counted, or two waiters would
+// each count the other and neither would start while one place is free.
 func boatRoom(self int, holders []slotHolder, listed []string, cap int) (ok bool, unowned []string) {
 	named := map[string]bool{}
-	others := 0
+	started := 0
 	for _, h := range holders {
 		if h.PID == self {
 			continue
 		}
-		others++
+		if h.Started {
+			started++
+		}
 		if h.Machine != "" {
 			named[h.Machine] = true
 		}
@@ -112,22 +116,33 @@ func boatRoom(self int, holders []slotHolder, listed []string, cap int) (ok bool
 			unowned = append(unowned, id)
 		}
 	}
-	return others+len(unowned) < cap, unowned
+	return started+len(unowned) < cap, unowned
 }
 
-// waitForBoatRoom keeps the lease until a machine fits. Another holder waiting here at the same
-// time counts this one, so neither starts while the count is full.
-func waitForBoatRoom(pool slotPool) {
+// waitForBoatRoom keeps the lease until a machine fits, then marks it started. The count and the
+// mark happen under the pool's queue lock, so two waiters never both take the last place.
+func waitForBoatRoom(pool slotPool, lease *boatLease) {
 	told := ""
 	for {
 		listed, err := listedMachines()
 		if err != nil {
-			// The holders alone still bound this PC's own starts; the caller's own boat calls will
+			// The leases alone still bound this PC's own starts; the caller's own boat calls will
 			// meet the same problem and say so.
 			fmt.Fprintf(os.Stderr, "[fairshare] could not count boat's machines (%v); going by the leases alone.\n", err)
+			lease.start()
+			return
+		}
+		gate, err := lockSlotQueue(pool.dir, time.Now(), 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[fairshare] could not lock the boat lease queue (%v); going by the leases alone.\n", err)
+			lease.start()
 			return
 		}
 		ok, unowned := boatRoom(os.Getpid(), pool.holders(), listed, pool.count)
+		if ok {
+			lease.start()
+		}
+		gate.Close()
 		if ok {
 			return
 		}
@@ -147,13 +162,24 @@ type boatLease struct {
 	holder slotHolder
 }
 
+// name records the lease's machine in its lease file.
 func (l *boatLease) name(id string) {
+	l.update(func(h *slotHolder) { h.Machine = id })
+}
+
+// start records that the holder was let through to start its machine.
+func (l *boatLease) start() {
+	l.update(func(h *slotHolder) { h.Started = true })
+}
+
+func (l *boatLease) update(change func(*slotHolder)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.holder.Machine == id || l.slot == nil || l.slot.f == nil {
+	before := l.holder
+	change(&l.holder)
+	if l.holder == before || l.slot == nil || l.slot.f == nil {
 		return
 	}
-	l.holder.Machine = id
 	b, _ := json.Marshal(l.holder)
 	_ = l.slot.f.Truncate(0)
 	_, _ = l.slot.f.WriteAt(b, 0)
@@ -234,8 +260,8 @@ func cmdLease(args []string) int {
 		return 1
 	}
 	defer slot.Close()
-	waitForBoatRoom(pool)
 	lease := &boatLease{slot: slot, holder: slot.holder}
+	waitForBoatRoom(pool, lease)
 	waited := slot.Waited
 	logEvent("lease", map[string]any{"pool": "boat", "label": label, "cwd": cwd, "waited_ms": waited.Milliseconds()})
 	held := time.Now()
