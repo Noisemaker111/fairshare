@@ -30,7 +30,10 @@ Review that file before sharing it.
   class on the whole process tree, so a child can't raise itself back. Your game and apps get
   priority while agent work uses available capacity.
 - **Never leaves anything behind.** `run` puts the tree in a job Windows kills when fairshare
-  exits, however it exits.
+  exits, however it exits. When a chat's own process exits, `adopt` ends everything left in that
+  chat's lane, including a helper whose parent died long before (Windows never ends a child with
+  its parent: on 2026-11-07, 75 Convex executor `node.exe` were still running, up to 94 hours old,
+  their backends long gone).
 - **Never suspends anything unless asked to.** A suspended chat looks hung, so by default agent
   work is only lowered in priority. With `--freeze` (`run` or `adopt`), when free RAM or free
   commit falls below 6 GB, the youngest agent work on the PC freezes, one piece at a time; once
@@ -105,7 +108,8 @@ logged against its chat.
 
 `adopt` puts each process started under a chat into that chat's lane; whatever it starts
 afterwards is in the lane too. The chat's own process stays at normal priority, so the agent's own
-loop stays quick. Work it adopted keeps its low priority if `adopt` stops.
+loop stays quick. When the chat's process exits, everything still in its lane ends. If `adopt`
+itself stops, work it adopted runs on at its low priority.
 
 A lane is a job named after the chat's harness process. A process that is already inside another
 job gets a side job of its own instead, which Windows nests where the process already is:

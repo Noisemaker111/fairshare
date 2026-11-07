@@ -33,6 +33,21 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case "exit":
 		os.Exit(0)
+	case "orphan-parent":
+		// Like convex-local-backend starting its node executors: start a long-lived child with no
+		// job of its own, write its ID down, then die, leaving it orphaned in whatever job it is in.
+		time.Sleep(1500 * time.Millisecond) // adopt has placed this process by now
+		c := exec.Command(os.Args[0])
+		c.Env = append(os.Environ(), "FAIRSHARE_TEST_HELPER=linger")
+		if err := c.Start(); err != nil {
+			os.Exit(1)
+		}
+		os.WriteFile(os.Getenv("FAIRSHARE_TEST_PIDFILE"), []byte(fmt.Sprint(c.Process.Pid)), 0o644)
+		time.Sleep(2500 * time.Millisecond) // and adopt has placed the child
+		os.Exit(0)
+	case "linger":
+		time.Sleep(time.Minute)
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -84,7 +99,7 @@ func TestSideJobKeepsBreakawayOfTheJobAroundIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := newLane(gov, 0, 0, "test", u)
-	defer l.close(gov, "test over")
+	defer l.close(gov, "test over", nil)
 	if how := l.place(gov, uint32(shell.Process.Pid), h); how != "side job" {
 		t.Fatalf("placed as %q, want a side job", how)
 	}

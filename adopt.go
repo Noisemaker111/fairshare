@@ -153,10 +153,10 @@ func cmdAdopt(args []string) int {
 	} else {
 		fmt.Fprintf(os.Stderr, "fairshare adopt: watching every child of %s, and %s started elsewhere\n", *hosts, *harness)
 	}
-	closeLane := func(h uint32, why string) {
+	closeLane := func(h uint32, why string, procs map[uint32]procInfo) {
 		l := lanes[h]
 		nHolds += l.holds
-		l.close(gov, why)
+		l.close(gov, why, procs)
 		delete(lanes, h)
 		if *verbose {
 			fmt.Fprintf(os.Stderr, "  %6.1fs lane %d %s closed: %s\n", time.Since(start).Seconds(), h, l.name, why)
@@ -199,7 +199,7 @@ func cmdAdopt(args []string) int {
 		}
 		for h, l := range lanes {
 			if p, ok := procs[h]; !ok || p.created != l.created {
-				closeLane(h, "chat ended")
+				closeLane(h, "chat ended", procs) // and everything left in its lane ends
 				continue
 			}
 			for pid := range l.outside {
@@ -262,7 +262,7 @@ func cmdAdopt(args []string) int {
 		time.Sleep(*every)
 	}
 	for h := range lanes {
-		closeLane(h, "adopt stopped")
+		closeLane(h, "adopt stopped", nil) // adopted work survives adopt stopping
 	}
 	writeStatus(nil)
 	var c, e, k, u windows.Filetime

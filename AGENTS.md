@@ -40,7 +40,8 @@ pass that way. A test's own `adopt` always takes `--pid`, and a test never runs 
 
 - Everything a command starts must end up in a job Windows kills when its owner exits
   (`killOnExitJob`, `Governor.NewUnit(true)`). `adopt` is the one exception: work it adopts must
-  survive it stopping.
+  survive it stopping. When a chat's own process exits, `adopt` ends everything left in its lane
+  (`lane.end`).
 - Put processes in jobs through a `jobSet` (jobset.go), never `AssignProcessToJobObject` directly.
   A process already in a job can only join an empty job, and that nests the new job inside the old
   one. The Store PowerShell is always in its package's job.
