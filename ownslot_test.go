@@ -52,3 +52,19 @@ func TestTheHookLeavesASelfSlottingCheckToItself(t *testing.T) {
 		t.Error("an unlisted check still waits:", d)
 	}
 }
+
+// A self-slotting check's CPU is its slotted steps', so the whole command never joins the list.
+func TestASelfSlottingCheckNeverJoinsTheHeavyList(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("FAIRSHARE_EVENTS", filepath.Join(t.TempDir(), "events.jsonl"))
+	own := repoWith(t, `{"ownSlot": ["bun run lane:close"]}`)
+	if recordHeavy(heavyRun{Dir: own, Cmd: "bun run lane:close", CPUSeconds: 10 * heavyCPUSeconds}) {
+		t.Fatal("a self-slotting check joined the heavy list")
+	}
+	if _, listed := heavyListed(own, "bun run lane:close"); listed {
+		t.Fatal("a self-slotting check is listed")
+	}
+	if !recordHeavy(heavyRun{Dir: own, Cmd: "bun run check", CPUSeconds: 10 * heavyCPUSeconds}) {
+		t.Fatal("another heavy check in the same repo did not join")
+	}
+}
