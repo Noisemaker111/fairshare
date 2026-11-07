@@ -230,8 +230,8 @@ func cmdExec(args []string) int {
 	}
 	// A whole suite or check waits for a heavy-job slot (slot.go), for at most half its time.
 	var slot *heavySlot
-	if heavyRun(cmdText) {
-		cwd, _ := os.Getwd()
+	// A repository can say the command takes its own slot for its local part (ownslot.go).
+	if cwd, _ := os.Getwd(); heavyRun(cmdText) && !ownSlot(cmdText, cwd) {
 		s, err := acquireSlot(cmdText, cwd, label, limit/2, func(m string) { out.Write([]byte(m + "\n")) })
 		if err != nil {
 			if !errors.Is(err, errBusy) {

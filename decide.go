@@ -717,7 +717,7 @@ func decide(c Call) Decision {
 		// it still waits for a heavy-job slot, with its output and exit code untouched (slot.go).
 		// A leading VAR=value belongs to the command, so that one runs as it is.
 		// In front, it waits at most half the agent's time limit, then says it did not start.
-		if heavyRun(body) && !leadAssign.MatchString(body) {
+		if heavyRun(body) && !leadAssign.MatchString(body) && !ownSlot(body, c.Cwd) {
 			wait := ""
 			if !truthy(input["run_in_background"]) && harness > 0 {
 				wait = fmt.Sprintf("--wait %d ", harness/2)
