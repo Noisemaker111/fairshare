@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/Noisemaker111/fairshare/internal/windows"
@@ -92,5 +93,37 @@ func TestSideJobKeepsBreakawayOfTheJobAroundIt(t *testing.T) {
 	line, _ := bufio.NewReader(stdout).ReadString('\n')
 	if strings.TrimSpace(line) != "spawned" {
 		t.Fatalf("a program in a side job could not start a child its own job let it start: %q", strings.TrimSpace(line))
+	}
+}
+
+// A process that just appeared may still be starting: a Store app (the Store PowerShell) fails to
+// start with "Access is denied" if it is put in a job before Windows puts it in its package's job.
+// So exec's sweep (and adopt) leave a new process alone for settleTime, then take it.
+func TestSweepLeavesAStartingProcessUntilItSettles(t *testing.T) {
+	job, err := killOnCloseJob()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(job)
+	s := &jobSet{main: job, newSide: func() (windows.Handle, func(), error) {
+		j, err := killOnCloseJob()
+		return j, func() { windows.CloseHandle(j) }, err
+	}}
+	defer s.release()
+	child := exec.Command(os.Args[0])
+	child.Env = append(os.Environ(), "FAIRSHARE_TEST_HELPER=spawn-breakaway") // waits on stdin
+	stdin, _ := child.StdinPipe()
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	defer func() { stdin.Close(); child.Process.Kill(); child.Wait() }()
+	self, tried := uint32(os.Getpid()), map[uint32]bool{}
+	if pulled, sided, _, _ := pullIntoJobs(s, self, tried); pulled+sided != 0 {
+		t.Fatalf("a process %s old was moved into a job while it may still be starting", time.Since(started))
+	}
+	time.Sleep(time.Until(started.Add(settleTime + 200*time.Millisecond)))
+	if pulled, sided, out, why := pullIntoJobs(s, self, tried); pulled+sided != 1 {
+		t.Fatalf("once settled it should join a job: pulled %d, side %d, outside %v, %v", pulled, sided, out, why)
 	}
 }

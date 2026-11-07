@@ -487,7 +487,11 @@ func descendants(procs map[uint32]procInfo, root uint32) []uint32 {
 // counted nor stopped. Any that refuse even an empty job are returned, so callers can still count
 // and stop them by parent link.
 func pullIntoJobs(s *jobSet, root uint32, tried map[uint32]bool) (pulled, sided int, outside []uint32, why error) {
-	for _, pid := range descendants(snapshot(), root) {
+	procs := snapshot()
+	for _, pid := range descendants(procs, root) {
+		if starting(procs[pid].created) {
+			continue // the next sweep takes it (see starting)
+		}
 		if tried[pid] {
 			outside = append(outside, pid)
 			continue
