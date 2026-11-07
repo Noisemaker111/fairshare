@@ -29,7 +29,7 @@ The thread shell (every agent tool call goes through it):
   fairshare install [--uninstall] [--hooks-only]  hook in Claude Code, Codex and OpenCode; adopt always on
   fairshare hook claude|codex|opencode       one PreToolUse payload on stdin -> pass, rewrite or send back
   fairshare exec <bash|pwsh> <b64> <ms>      run a long test/build/install with a summary and early stops
-  fairshare slot <command> [args...]         run a whole suite or check once a heavy-job slot is free (2 per PC)
+  fairshare slot <command> [args...]         measure a command; one on the heavy list first waits for a slot (2 per PC)
   fairshare await <file> [maxS] [quietS]     wait for a Claude background task's output to finish
   fairshare report [--hours 24]              what every chat ran, waited on and wasted, from the event log
 

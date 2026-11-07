@@ -4,7 +4,8 @@ package main
 // their work that runs on this PC. jgengine's `bun run lane:close` and `verify:fast` send their
 // Linux steps to a cloud machine (boat.dev) and wait for one when both are busy; held around the
 // whole command, a slot sat idle through that wait while Windows-only work queued behind it. Those
-// commands run `fairshare slot` around their own local steps instead.
+// commands run `fairshare slot` around their own local steps instead, so the hook, exec and the heavy
+// list leave the whole command alone (heavyListed, recordHeavy, slotWraps).
 //
 // `.fairshare.json` at the repository root:
 //

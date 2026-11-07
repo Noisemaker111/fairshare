@@ -50,13 +50,19 @@ Review that file before sharing it.
   Code, Codex and OpenCode. It passes, rewrites, or sends back each call, and runs long tests and
   builds through `exec`, which keeps their output out of the chat, stops them before the agent's
   time limit, and stops a run that has hung.
-- **Runs at most two whole suites at once on the PC.** A whole test suite, build or check (not
-  one test file, one Go package or a `-run` filter) waits for one of two heavy-job slots shared by
-  every chat and repo (`FAIRSHARE_HEAVY_SLOTS` changes the count). Without them, six chats each
-  started a full suite and tests failed on their own time limits instead of on bugs. A slot is a
-  lock file Windows frees when its holder exits, however it exits, and a waiting run names who
-  holds each slot. `exec` takes one for foreground runs; the hook puts `fairshare slot` in front of
-  background runs and runs that write to a file. Work started inside a slot never waits again.
+- **Runs at most two heavy jobs at once on the PC.** A command on the heavy list waits for one of
+  two heavy-job slots shared by every chat and repo (`FAIRSHARE_HEAVY_SLOTS` changes the count);
+  any other command never waits. Without slots, six chats each started a full suite and tests
+  failed on their own time limits instead of on bugs. A slot is a lock file Windows frees when its
+  holder exits, however it exits, and a waiting run names who holds each slot and how to run the
+  check on a boat.dev Linux machine instead. Work started inside a slot never waits again.
+- **Learns what is heavy instead of guessing.** Every run `exec` takes, and every run the hook puts
+  `fairshare slot` in front of (background runs, runs that write to a file, piped test or build
+  runs), is measured. The first time one run of a command uses 120 CPU-seconds, the command joins
+  `%LOCALAPPDATA%\fairshare\heavy.json`: one entry per repo (its origin URL, so every worktree
+  shares it) and command, with its CPU, wall time, peak memory, first and last run, and run count.
+  Edit it by hand; deleting an entry takes the command off. `install` starts the list once from the
+  runs already in the event log, and `fairshare report` shows it.
 - **Logs every data point.** One JSON line per tool call, long run, chat and `adopt` session goes
   to `%LOCALAPPDATA%\fairshare\events.jsonl`. `fairshare report` reads it back.
 
@@ -82,7 +88,7 @@ fairshare bench lanes                    a 48-thread chat against a 2-thread one
 fairshare ceiling --what idle|spawn      how many idle processes / starts per second the PC takes
 fairshare du <folders>                   real disk use, counting hardlinked files once
 fairshare inspect                        the priorities and desktop Windows gave this process
-fairshare slot bun run check             run it once a heavy-job slot is free (the hook adds this)
+fairshare slot bun run check             measure it; if it is on the heavy list, first wait for a slot (the hook adds this)
 ```
 
 `fairshare install` makes `adopt` part of the PC rather than of one agent: a scheduled task (no

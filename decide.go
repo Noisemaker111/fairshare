@@ -478,6 +478,43 @@ func (r *ruleSet) add(name string) {
 	}
 }
 
+var (
+	// Words that are the shell's own, not a program `slot` could start, and sleep, which is a wait, not work.
+	builtinsBash = set("cd", "export", "source", ".", "echo", "printf", "set", "unset", "eval", "exec", "read", "test", "[", "[[", "if", "for", "while", "until", "case", "function", "{", "(", "!", "true", "false", ":", "wait", "kill", "trap", "local", "declare", "alias", "type", "command", "builtin", "pushd", "popd", "time", "exit", "return", "shift", "ulimit", "umask", "jobs", "fg", "bg", "disown", "hash", "history", "let", "sleep")
+	builtinsPwsh = set("cd", "echo", "cat", "ls", "dir", "rm", "del", "cp", "copy", "mv", "move", "pwd", "type", "gc", "gci", "gi", "sc", "ac", "where", "select", "sort", "kill", "ps", "sleep", "mkdir", "md", "rmdir", "rd", "clear", "cls", "man", "help", "foreach", "%", "?", "if", "for", "while", "switch", "function", "try", "exit", "return", "set", "start", "write", "tee", "measure", "diff", "iex", "(", "{", "[", "$", ".", "&")
+	verbNoun     = regexp.MustCompile(`^[A-Za-z]+-[A-Za-z]+$`) // a PowerShell cmdlet
+	writesFile   = regexp.MustCompile(`(?:^|[^&\d<>])\d?>>?\s*[^&\s]`)
+	toNowhere    = regexp.MustCompile(`\d?>>?\s*(?:/dev/null|\$null|NUL)\b`)
+)
+
+// slotWraps says whether a segment the agent's shell runs goes through `fairshare slot`: a program
+// (not a builtin, cmdlet, server or VAR=value command) that runs in the background, writes to a
+// file, is a piped test or build run, or is on the heavy list. A command its repository says takes
+// its own slot (ownslot.go) runs as it is: it puts `fairshare slot` around its own local steps.
+func slotWraps(c Call, body string, background bool) bool {
+	if leadAssign.MatchString(body) || server.MatchString(body) || discoveryRun.MatchString(body) || ownSlot(body, c.Cwd) {
+		return false
+	}
+	head := strings.TrimSpace(pipes(body)[0])
+	w := strings.Fields(head) // only the first word matters; words() gives up on any redirect
+	if len(w) == 0 {
+		return false
+	}
+	first := strings.ToLower(w[0])
+	if c.Shell == "pwsh" {
+		if builtinsPwsh[first] || verbNoun.MatchString(w[0]) || strings.ContainsAny(w[0], "$(){}@") {
+			return false
+		}
+	} else if builtinsBash[first] || strings.ContainsAny(w[0], "$(){}=`") {
+		return false
+	}
+	if background || writesFile.MatchString(toNowhere.ReplaceAllString(unquoted(head), "")) || isLongRun(head) {
+		return true
+	}
+	_, listed := heavyListed(c.Cwd, head)
+	return listed
+}
+
 // runnerCommand is how a rewritten command calls this program back.
 var runnerCommand = func(shell string) string {
 	exe, err := os.Executable()
@@ -713,17 +750,19 @@ func decide(c Call) Decision {
 			continue
 		}
 
-		// A whole suite or check that stays in the agent's shell (background, redirected, piped):
-		// it still waits for a heavy-job slot, with its output and exit code untouched (slot.go).
-		// A leading VAR=value belongs to the command, so that one runs as it is.
-		// In front, it waits at most half the agent's time limit, then says it did not start.
-		if heavyRun(body) && !leadAssign.MatchString(body) && !ownSlot(body, c.Cwd) {
+		// A run that stays in the agent's shell and could turn out heavy (in the background, writing
+		// to a file, a piped test or build run) or is already on the heavy list goes through `slot`,
+		// with its output and exit code untouched: slot measures it for the list and, only when it is
+		// listed, waits for a heavy-job slot (slot.go, heavy.go). A leading VAR=value belongs to the
+		// command, and a shell builtin or a server is no program to measure, so those run as they are.
+		// In front, a listed command waits at most half the agent's time limit, then says it did not start.
+		if slotWraps(c, body, truthy(input["run_in_background"])) {
 			wait := ""
 			if !truthy(input["run_in_background"]) && harness > 0 {
 				wait = fmt.Sprintf("--wait %d ", harness/2)
 			}
 			body = runnerCommand(c.Shell) + " slot " + wait + body
-			rules.add("heavy-slot")
+			rules.add("slot")
 			s.Text = lead + body
 			continue
 		}

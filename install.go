@@ -274,6 +274,12 @@ func cmdInstall(args []string) int {
 			return 1
 		}
 		fmt.Println("installed", exe)
+		// The heavy list starts from the runs already measured, once (heavy.go).
+		if n, err := seedHeavy(); err != nil {
+			fmt.Fprintln(os.Stderr, "fairshare install: heavy list:", err)
+		} else if n > 0 {
+			fmt.Printf("heavy list started with %d commands from earlier runs: %s\n", n, heavyFile())
+		}
 	}
 	command, err := hookCommand(exe)
 	if err != nil {

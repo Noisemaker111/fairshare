@@ -6,9 +6,13 @@ package main
 // cut off at 02:01 that way, after an evening of agents rerunning "flaky" tests). Idle priority
 // alone does not help: heavy jobs at idle priority still share the CPU with each other.
 //
+// Only a command on the heavy list (heavy.go) waits for a slot; any other command runs at once.
+// Nothing is judged from a command's name: every run `exec` and `slot` wrap is measured, and the
+// list learns a command the first time one run of it is heavy.
+//
 // A slot is a lock file held open for writing. Windows closes it when the holder exits, however
 // it exits, so a crashed or killed run never keeps a slot. The file holds who has it, so a run that
-// waits can say what it waits for. A single test file or package never waits (see heavyRun).
+// waits can say what it waits for.
 
 import (
 	"encoding/json"
@@ -30,27 +34,9 @@ import (
 const heldEnv = "FAIRSHARE_HEAVY_HELD"
 
 var (
-	installRun = regexp.MustCompile(`^(?:npm|pnpm|yarn|bun)\s+(?:i|install|ci)\b`)
-	goRun      = regexp.MustCompile(`^go\s`)
-	goTargeted = regexp.MustCompile(`\s-run[\s=]`)
-	// heavyExtra: whole checks whose names say nothing longRun knows.
-	heavyExtra   = regexp.MustCompile(`^(?:bun|npm|pnpm)\s+run\s+(?:lane:close|smoke\S*|perf\S*|bench\S*)(?:\s|$)|^node\s+\S*check\.mjs\b`)
 	discoveryRun = regexp.MustCompile(`^(?:bun|npm|pnpm)\s+run\s+(?:verify(?::smoke)?\s+--plan|smoke:ci\s+--list)(?:\s|$)`)
 	leadAssign   = regexp.MustCompile(`^\w+=`)
 )
-
-// heavyRun is a command that loads the whole PC: a whole suite, build or check. One test file,
-// one Go package or one -run filter is light, and installs are short; those never wait.
-func heavyRun(s string) bool {
-	s = strings.TrimSpace(s)
-	if discoveryRun.MatchString(s) || server.MatchString(s) || installRun.MatchString(s) || singleTest.MatchString(s) {
-		return false
-	}
-	if goRun.MatchString(s) && (!strings.Contains(s, "./...") || goTargeted.MatchString(s)) {
-		return false
-	}
-	return longRun.MatchString(s) || heavyExtra.MatchString(s)
-}
 
 func slotsDir() string { return filepath.Join(eventsDir(), "slots") }
 
@@ -142,8 +128,9 @@ func describeHolders(hs []slotHolder) string {
 	return strings.Join(parts, "; ")
 }
 
-// acquireSlot waits for a free slot, up to maxWait (0: no limit). note is told once, when it has
-// to wait. Work that already holds a slot gets an empty one at once.
+// acquireSlot waits for a free slot, up to maxWait (0: no limit). note is told who holds the slots,
+// once, when it has to wait. Work that already holds a slot gets an empty one at once. Callers ask
+// only for a command on the heavy list.
 func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string)) (*heavySlot, error) {
 	if os.Getenv(heldEnv) != "" {
 		return &heavySlot{}, nil
@@ -198,7 +185,7 @@ func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string
 		}
 		gate.Close()
 		if !told && note != nil {
-			note(fmt.Sprintf("[fairshare] waiting its turn for a heavy-job slot (current holders: %s). One test file or package never waits.", describeHolders(slotHolders())))
+			note(describeHolders(slotHolders()))
 			told = true
 		}
 		if maxWait > 0 && time.Since(start) >= maxWait {
@@ -208,9 +195,15 @@ func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string
 	}
 }
 
-// `fairshare slot <command> [args...]` runs a command once a heavy-job slot is free, with the
-// agent's own output, redirects and exit code untouched. The hook puts it in front of whole
-// suites and checks that run in the background or write to the agent's own files.
+// waitNote is what a run on the heavy list tells the agent while it waits for a slot.
+func waitNote(e heavyEntry, cmd, holders string) string {
+	return fmt.Sprintf("[fairshare] waiting its turn for a heavy-job slot: %s. Current holders: %s.%s", heavyNote(e), holders, boatHint(cmd))
+}
+
+// `fairshare slot [--wait <ms>] <command> [args...]` runs a command with the agent's own output,
+// redirects and exit code untouched, and measures it for the heavy list. A command on the list
+// first waits for a heavy-job slot; any other starts at once. The hook puts it in front of runs in
+// the background, runs that write to a file, piped test or build runs, and listed commands.
 func cmdSlot(args []string) int {
 	var maxWait time.Duration // --wait <ms>: give up then; none waits as long as it takes
 	if len(args) >= 2 && args[0] == "--wait" {
@@ -227,33 +220,40 @@ func cmdSlot(args []string) int {
 	}
 	signal.Ignore(os.Interrupt) // the command gets Ctrl+C itself; we wait for it and pass on its code
 	endWithCaller("slot")
-	// Everything the command starts is in a job Windows kills when this process ends.
-	if job, err := killOnExitJob(); err != nil && job != 0 {
-		windows.CloseHandle(job)
-	}
-	// The job contains this process. Let the OS close its handle at process exit;
-	// closing it here kills this process before it can return the child's status.
+	// Everything the command starts is in a job Windows kills when this process ends. The job
+	// contains this process, so its handle is left for the OS to close at exit: closing it here
+	// would kill this process before it could return the child's status. It also counts the
+	// command's CPU for the heavy list.
+	job, jobErr := killOnExitJob()
 	text := strings.Join(args, " ")
 	cwd, _ := os.Getwd()
-	s, err := acquireSlot(text, cwd, "", maxWait, func(m string) { fmt.Fprintln(os.Stderr, m) })
-	if err != nil {
-		if !errors.Is(err, errBusy) {
-			fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
-			logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "queue-error"})
-			return 1
+	s := &heavySlot{}
+	entry, listed := heavyListed(cwd, text)
+	if listed {
+		var err error
+		s, err = acquireSlot(text, cwd, "", maxWait, func(holders string) { fmt.Fprintln(os.Stderr, waitNote(entry, text, holders)) })
+		if err != nil {
+			if !errors.Is(err, errBusy) {
+				fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
+				logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "queue-error"})
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "[fairshare] not started: no heavy-job slot came free in %s. Run it with run_in_background (it then waits as long as it takes), or narrow it to the files you changed.%s\n", maxWait.Round(time.Second), boatHint(text))
+			logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "no-slot", "waited_ms": maxWait.Milliseconds()})
+			return 124
 		}
-		fmt.Fprintf(os.Stderr, "[fairshare] not started: no heavy-job slot came free in %s. Run it with run_in_background (it then waits as long as it takes), or narrow it to the files you changed.\n", maxWait.Round(time.Second))
-		logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "no-slot", "waited_ms": maxWait.Milliseconds()})
-		return 124
-	}
-	defer s.Close()
-	if s.Waited > time.Second {
-		fmt.Fprintf(os.Stderr, "[fairshare] got a slot after %s\n", s.Waited.Round(time.Second))
+		defer s.Close()
+		if s.Waited > time.Second {
+			fmt.Fprintf(os.Stderr, "[fairshare] got a slot after %s\n", s.Waited.Round(time.Second))
+		}
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(), heldEnv+"=1")
+	if listed {
+		cmd.Env = append(os.Environ(), heldEnv+"=1")
+	}
 	started := time.Now()
+	cpu0 := selfCPU()
 	code := 0
 	if err := cmd.Run(); err != nil {
 		code = 127
@@ -263,6 +263,21 @@ func cmdSlot(args []string) int {
 			fmt.Fprintln(os.Stderr, "fairshare slot:", err)
 		}
 	}
-	logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "exit": code, "waited_ms": s.Waited.Milliseconds(), "wall_ms": time.Since(started).Milliseconds()})
+	wall := time.Since(started)
+	ev := map[string]any{"cmd": clip(text, 300), "cwd": cwd, "exit": code, "wall_ms": wall.Milliseconds(), "listed": listed}
+	if listed {
+		ev["waited_ms"] = s.Waited.Milliseconds()
+	}
+	if jobErr == nil {
+		st := jobStats(job)
+		cpu := max(0, st.CPUSeconds-(selfCPU()-cpu0))
+		ev["cpu_ms"], ev["peak_mb"] = int64(cpu*1000), round1(st.PeakMB)
+		if recordHeavy(heavyRun{Dir: cwd, Cmd: text, CPUSeconds: cpu, WallSeconds: wall.Seconds(), PeakMB: st.PeakMB, At: started}) {
+			ev["listed_now"] = true
+		}
+	} else {
+		ev["job_error"] = jobErr.Error()
+	}
+	logEvent("slot", ev)
 	return code
 }

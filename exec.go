@@ -228,19 +228,19 @@ func cmdExec(args []string) int {
 	if deadline > 0 && deadline < limit {
 		limit = deadline
 	}
-	// A whole suite or check waits for a heavy-job slot (slot.go), for at most half its time.
+	// A command on the heavy list (heavy.go) waits for a heavy-job slot, for at most half its time.
 	var slot *heavySlot
-	// A repository can say the command takes its own slot for its local part (ownslot.go).
-	if cwd, _ := os.Getwd(); heavyRun(cmdText) && !ownSlot(cmdText, cwd) {
-		s, err := acquireSlot(cmdText, cwd, label, limit/2, func(m string) { out.Write([]byte(m + "\n")) })
+	cwd, _ := os.Getwd()
+	if entry, listed := heavyListed(cwd, cmdText); listed {
+		s, err := acquireSlot(cmdText, cwd, label, limit/2, func(holders string) { out.Write([]byte(waitNote(entry, cmdText, holders) + "\n")) })
 		if err != nil {
 			if !errors.Is(err, errBusy) {
 				fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
 				logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 1, "stopped": "queue-error"})
 				return 1
 			}
-			os.Stdout.WriteString(fmt.Sprintf("[fairshare] not started: %s within %s; the PC already runs %d whole suites or checks (%s). Run it with run_in_background, where it waits its turn, or narrow it to one test file or package.\n",
-				errBusy, (limit / 2).Round(time.Second), slotCount(), describeHolders(slotHolders())))
+			os.Stdout.WriteString(fmt.Sprintf("[fairshare] not started: %s within %s; %s, and the PC already runs %d heavy jobs (%s). Run it with run_in_background, where it waits its turn, or narrow it to one test file or package.%s\n",
+				errBusy, (limit / 2).Round(time.Second), heavyNote(entry), slotCount(), describeHolders(slotHolders()), boatHint(cmdText)))
 			logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 124, "stopped": "no-slot", "waited_ms": (limit / 2).Milliseconds()})
 			return 124
 		}
@@ -425,7 +425,7 @@ wait:
 		"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": code, "wall_ms": wall.Milliseconds(),
 		"out_bytes": len(text), "out_lines": strings.Count(text, "\n"), "summary_bytes": len(summary), "log": logPath,
 	}
-	if cwd, err := os.Getwd(); err == nil {
+	if cwd != "" {
 		ev["cwd"] = cwd
 	}
 	if stopped != "" {
@@ -450,8 +450,12 @@ wait:
 	}
 	if jobErr == nil {
 		s := jobs.stats()
-		ev["cpu_ms"] = int64(max(s.CPUSeconds-(selfCPU()-cpu0), seenTotal) * 1000)
+		cpu := max(s.CPUSeconds-(selfCPU()-cpu0), seenTotal)
+		ev["cpu_ms"] = int64(cpu * 1000)
 		ev["procs"], ev["peak_mb"], ev["read_mb"], ev["write_mb"] = s.Processes-1, round1(s.PeakMB), round1(s.ReadMB), round1(s.WriteMB)
+		if recordHeavy(heavyRun{Dir: cwd, Cmd: cmdText, CPUSeconds: cpu, WallSeconds: wall.Seconds(), PeakMB: s.PeakMB, At: start}) {
+			ev["listed_now"] = true
+		}
 	} else {
 		ev["job_error"] = jobErr.Error()
 	}

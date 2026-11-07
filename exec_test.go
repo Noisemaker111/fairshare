@@ -37,7 +37,8 @@ func runExec(t *testing.T, shell, cmd string, deadlineMs int, env ...string) (st
 	t.Helper()
 	events := filepath.Join(t.TempDir(), "events.jsonl")
 	c := exec.Command(fairshareBin(t), "exec", shell, base64.StdEncoding.EncodeToString([]byte(cmd)), itoa(deadlineMs), "test:abc")
-	c.Env = append(append(os.Environ(), "FAIRSHARE_EVENTS="+events), env...)
+	// Its own LOCALAPPDATA: the run reads and writes the heavy list and slots there, not the PC's.
+	c.Env = append(append(os.Environ(), "FAIRSHARE_EVENTS="+events, "LOCALAPPDATA="+filepath.Dir(events)), env...)
 	out, _ := c.Output()
 	code := c.ProcessState.ExitCode()
 	var ev map[string]any
