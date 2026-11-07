@@ -113,7 +113,7 @@ func TestOnlyListedCommandsWaitForASlot(t *testing.T) {
 	}
 	e, _ := heavyListed(wt, "cmd /c exit 7")
 	note := waitNote(e, "cmd /c exit 7", describeHolders(slotHolders()))
-	for _, want := range []string{"heavy list", "`bun run verify` in repo-a", "boat.exe run --timeout 1200 --push . -- cmd /c exit 7"} {
+	for _, want := range []string{"heavy list", "`bun run verify` in repo-a", "fairshare lease boat -- ~/.ascii/bin/boat.exe run --no-env --timeout 1200 --push . -- cmd /c exit 7"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("the wait note should say %q: %s", want, note)
 		}
@@ -147,7 +147,7 @@ func TestExecWaitsOnlyForAListedCommand(t *testing.T) {
 	if code != 124 || ev["stopped"] != "no-slot" {
 		t.Fatal("a listed run started with no slot free:", code, out)
 	}
-	for _, want := range []string{"heavy list", "`go test ./...` in repo-b", "boat.exe run --timeout 1200 --push . -- Write-Output listed"} {
+	for _, want := range []string{"heavy list", "`go test ./...` in repo-b", "fairshare lease boat -- ~/.ascii/bin/boat.exe run --no-env --timeout 1200 --push . -- Write-Output listed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the refusal should say %q: %s", want, out)
 		}

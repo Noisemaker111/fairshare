@@ -16,6 +16,7 @@ import (
 // A held write handle marks a live waiter; Windows closes it when the waiter dies.
 type slotTicket struct {
 	file *os.File
+	dir  string
 	name string
 }
 
@@ -31,9 +32,9 @@ func openSlotQueueFile(path string, creation uint32) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-func lockSlotQueue(start time.Time, maxWait time.Duration) (*os.File, error) {
+func lockSlotQueue(dir string, start time.Time, maxWait time.Duration) (*os.File, error) {
 	for {
-		f, err := openSlotQueueFile(filepath.Join(slotsDir(), "queue.lock"), windows.OPEN_ALWAYS)
+		f, err := openSlotQueueFile(filepath.Join(dir, "queue.lock"), windows.OPEN_ALWAYS)
 		if err == nil {
 			return f, nil
 		}
@@ -48,8 +49,8 @@ func lockSlotQueue(start time.Time, maxWait time.Duration) (*os.File, error) {
 }
 
 // Under the queue lock, remove only tickets whose owners no longer hold them.
-func liveSlotTickets() ([]string, error) {
-	entries, err := os.ReadDir(slotsDir())
+func liveSlotTickets(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +63,7 @@ func liveSlotTickets() ([]string, error) {
 		if _, err := strconv.ParseUint(name[:20], 10, 64); err != nil {
 			continue
 		}
-		path := filepath.Join(slotsDir(), name)
+		path := filepath.Join(dir, name)
 		stale, err := openSlotQueueFile(path, windows.OPEN_EXISTING)
 		if err == nil {
 			stale.Close()
@@ -82,13 +83,13 @@ func liveSlotTickets() ([]string, error) {
 	return live, nil // os.ReadDir returns filename order.
 }
 
-func newSlotTicket(start time.Time, maxWait time.Duration) (*slotTicket, error) {
-	gate, err := lockSlotQueue(start, maxWait)
+func newSlotTicket(dir string, start time.Time, maxWait time.Duration) (*slotTicket, error) {
+	gate, err := lockSlotQueue(dir, start, maxWait)
 	if err != nil {
 		return nil, err
 	}
 	defer gate.Close()
-	live, err := liveSlotTickets()
+	live, err := liveSlotTickets(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -101,11 +102,11 @@ func newSlotTicket(start time.Time, maxWait time.Duration) (*slotTicket, error) 
 		next = n + 1
 	}
 	name := fmt.Sprintf("%020d.wait", next)
-	f, err := openSlotQueueFile(filepath.Join(slotsDir(), name), windows.CREATE_NEW)
+	f, err := openSlotQueueFile(filepath.Join(dir, name), windows.CREATE_NEW)
 	if err != nil {
 		return nil, fmt.Errorf("fairshare slot queue: create ticket: %w", err)
 	}
-	return &slotTicket{file: f, name: name}, nil
+	return &slotTicket{file: f, dir: dir, name: name}, nil
 }
 
 // Call only while holding the queue lock: the filename cannot be reused before removal.
@@ -115,7 +116,7 @@ func (t *slotTicket) remove() error {
 	}
 	err := t.file.Close()
 	t.file = nil
-	if removeErr := os.Remove(filepath.Join(slotsDir(), t.name)); removeErr != nil && !os.IsNotExist(removeErr) {
+	if removeErr := os.Remove(filepath.Join(t.dir, t.name)); removeErr != nil && !os.IsNotExist(removeErr) {
 		return removeErr
 	}
 	return err

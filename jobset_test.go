@@ -19,6 +19,17 @@ const createBreakawayFromJob = 0x01000000
 // The test binary doubles as a program that, told to over stdin, starts a child the way the
 // MSYS2 runtime (Git Bash) does when its job allows breakaway: with CREATE_BREAKAWAY_FROM_JOB.
 func TestMain(m *testing.M) {
+	// Run as `boat list --json` (BOAT_EXE is this binary): list the machine ids in the file named by
+	// FAIRSHARE_TEST_BOAT_LIST, one per line.
+	if len(os.Args) > 1 && os.Args[1] == "list" && os.Getenv("FAIRSHARE_TEST_BOAT_LIST") != "" {
+		b, _ := os.ReadFile(os.Getenv("FAIRSHARE_TEST_BOAT_LIST"))
+		ids := []string{}
+		for _, id := range strings.Fields(string(b)) {
+			ids = append(ids, fmt.Sprintf("{\"id\":%q}", id))
+		}
+		fmt.Printf("{\"sandboxes\":[%s]}\n", strings.Join(ids, ","))
+		os.Exit(0)
+	}
 	switch os.Getenv("FAIRSHARE_TEST_HELPER") {
 	case "spawn-breakaway":
 		bufio.NewReader(os.Stdin).ReadString('\n')

@@ -53,12 +53,15 @@ type slotHolder struct {
 	Cwd   string `json:"cwd"`
 	Label string `json:"label,omitempty"`
 	Since string `json:"since"`
+	// Machine is the boat machine a boat lease holder started, once boat reported it.
+	Machine string `json:"machine,omitempty"`
 }
 
 // heavySlot is a held slot; release it with Close (exiting does the same).
 type heavySlot struct {
 	f      *os.File
 	Waited time.Duration
+	holder slotHolder
 }
 
 func (s *heavySlot) Close() {
@@ -70,34 +73,44 @@ func (s *heavySlot) Close() {
 
 var errBusy = errors.New("no heavy-job slot came free")
 
-// trySlot takes slot i if nobody holds it. Others may still read it to see who does.
-func trySlot(i int) *os.File {
-	path := filepath.Join(slotsDir(), fmt.Sprintf("heavy-%d.lock", i))
-	p, err := windows.UTF16PtrFromString(path)
+// slotPool is one set of slots with its own queue: the heavy-job slots, or the boat machines
+// (boat_lease.go). Each pool has its own folder, so its queue and its lock files never mix.
+type slotPool struct {
+	name  string // lock files are <name>-<i>.lock
+	dir   string
+	count int
+}
+
+func heavyPool() slotPool { return slotPool{name: "heavy", dir: slotsDir(), count: slotCount()} }
+
+// try takes slot i if nobody holds it. Others may still read it to see who does.
+func (p slotPool) try(i int) *os.File {
+	path := filepath.Join(p.dir, fmt.Sprintf("%s-%d.lock", p.name, i))
+	ptr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil
 	}
-	h, err := windows.CreateFile(p, windows.GENERIC_WRITE, windows.FILE_SHARE_READ, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	h, err := windows.CreateFile(ptr, windows.GENERIC_WRITE, windows.FILE_SHARE_READ, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
 		return nil
 	}
 	return os.NewFile(uintptr(h), path)
 }
 
-// slotHolders reads who holds each slot that is taken now.
-func slotHolders() []slotHolder {
+// holders reads who holds each slot that is taken now.
+func (p slotPool) holders() []slotHolder {
 	var out []slotHolder
-	for i := range slotCount() {
-		path := filepath.Join(slotsDir(), fmt.Sprintf("heavy-%d.lock", i))
-		if f := trySlot(i); f != nil { // free: it was only left over
+	for i := range p.count {
+		path := filepath.Join(p.dir, fmt.Sprintf("%s-%d.lock", p.name, i))
+		if f := p.try(i); f != nil { // free: it was only left over
 			f.Close()
 			continue
 		}
-		p, err := windows.UTF16PtrFromString(path)
+		ptr, err := windows.UTF16PtrFromString(path)
 		if err != nil {
 			continue
 		}
-		h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		h, err := windows.CreateFile(ptr, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 		if err != nil {
 			continue
 		}
@@ -112,6 +125,8 @@ func slotHolders() []slotHolder {
 	}
 	return out
 }
+
+func slotHolders() []slotHolder { return heavyPool().holders() }
 
 func describeHolders(hs []slotHolder) string {
 	var parts []string
@@ -128,24 +143,29 @@ func describeHolders(hs []slotHolder) string {
 	return strings.Join(parts, "; ")
 }
 
-// acquireSlot waits for a free slot, up to maxWait (0: no limit). note is told who holds the slots,
-// once, when it has to wait. Work that already holds a slot gets an empty one at once. Callers ask
-// only for a command on the heavy list.
+// acquireSlot waits for a free heavy-job slot, up to maxWait (0: no limit). note is told who holds
+// the slots, once, when it has to wait. Work that already holds a slot gets an empty one at once.
+// Callers ask only for a command on the heavy list.
 func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string)) (*heavySlot, error) {
 	if os.Getenv(heldEnv) != "" {
 		return &heavySlot{}, nil
 	}
-	if err := os.MkdirAll(slotsDir(), 0o755); err != nil {
+	return heavyPool().acquire(cmd, cwd, label, maxWait, note)
+}
+
+// acquire waits its turn in the pool's queue for a free slot, up to maxWait (0: no limit).
+func (p slotPool) acquire(cmd, cwd, label string, maxWait time.Duration, note func(string)) (*heavySlot, error) {
+	if err := os.MkdirAll(p.dir, 0o755); err != nil {
 		return nil, err
 	}
 	start := time.Now()
-	ticket, err := newSlotTicket(start, maxWait)
+	ticket, err := newSlotTicket(p.dir, start, maxWait)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if ticket.file != nil {
-			if gate, err := lockSlotQueue(time.Now(), 0); err == nil {
+			if gate, err := lockSlotQueue(p.dir, time.Now(), 0); err == nil {
 				_ = ticket.remove()
 				gate.Close()
 			} else {
@@ -156,23 +176,24 @@ func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string
 	}()
 	told := false
 	for {
-		gate, err := lockSlotQueue(start, maxWait)
+		gate, err := lockSlotQueue(p.dir, start, maxWait)
 		if err != nil {
 			return nil, err
 		}
-		live, err := liveSlotTickets()
+		live, err := liveSlotTickets(p.dir)
 		if err != nil {
 			gate.Close()
 			return nil, err
 		}
 		if len(live) > 0 && live[0] == ticket.name {
-			for i := range slotCount() {
-				f := trySlot(i)
+			for i := range p.count {
+				f := p.try(i)
 				if f == nil {
 					continue
 				}
 				f.Truncate(0)
-				b, _ := json.Marshal(slotHolder{PID: os.Getpid(), Cmd: cmd, Cwd: cwd, Label: label, Since: time.Now().Format(time.RFC3339)})
+				holder := slotHolder{PID: os.Getpid(), Cmd: cmd, Cwd: cwd, Label: label, Since: time.Now().Format(time.RFC3339)}
+				b, _ := json.Marshal(holder)
 				f.WriteAt(b, 0)
 				if err := ticket.remove(); err != nil {
 					f.Close()
@@ -180,12 +201,12 @@ func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string
 					return nil, err
 				}
 				gate.Close()
-				return &heavySlot{f: f, Waited: time.Since(start)}, nil
+				return &heavySlot{f: f, Waited: time.Since(start), holder: holder}, nil
 			}
 		}
 		gate.Close()
 		if !told && note != nil {
-			note(describeHolders(slotHolders()))
+			note(describeHolders(p.holders()))
 			told = true
 		}
 		if maxWait > 0 && time.Since(start) >= maxWait {
