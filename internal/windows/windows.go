@@ -155,6 +155,7 @@ var (
 	procCreateFileW                  = kernel32.NewProc("CreateFileW")
 	procCreateJobObjectW             = kernel32.NewProc("CreateJobObjectW")
 	procAssignProcessToJobObject     = kernel32.NewProc("AssignProcessToJobObject")
+	procTerminateJobObject           = kernel32.NewProc("TerminateJobObject")
 	procSetInformationJobObject      = kernel32.NewProc("SetInformationJobObject")
 	procQueryInformationJobObject    = kernel32.NewProc("QueryInformationJobObject")
 	procCreateIoCompletionPort       = kernel32.NewProc("CreateIoCompletionPort")
@@ -242,6 +243,12 @@ func CreateJobObject(sa *SecurityAttributes, name *uint16) (Handle, error) {
 
 func AssignProcessToJobObject(job, process Handle) error {
 	_, err := ok(procAssignProcessToJobObject, uintptr(job), uintptr(process))
+	return err
+}
+
+// TerminateJobObject ends every process in the job and in the jobs nested inside it.
+func TerminateJobObject(job Handle, exitCode uint32) error {
+	_, err := ok(procTerminateJobObject, uintptr(job), uintptr(exitCode))
 	return err
 }
 

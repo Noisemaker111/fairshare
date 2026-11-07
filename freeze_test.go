@@ -62,7 +62,7 @@ func suspensionsUnder(t *testing.T, p Policy) (int64, int) {
 			t.Fatal(err)
 		}
 		l := newLane(gov, 0, 0, "test", u)
-		defer l.close(gov, "test over") // thaws anything frozen
+		defer l.close(gov, "test over", nil) // thaws anything frozen
 		if how := l.place(gov, pid, h); how == "outside" {
 			t.Fatalf("ping %d stayed outside the lane", pid)
 		}

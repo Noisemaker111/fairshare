@@ -236,9 +236,17 @@ func (b *laneBalance) finish(dt float64, allowed bool, caps map[string]float64) 
 	return capsChanged
 }
 
-// close logs what the chat cost and lets its work run on at low priority, without a cap.
-func (l *lane) close(gov *Governor, why string) {
+// close logs what the chat cost. When the chat itself ended (procs is the look that found it gone),
+// everything left in its lane ends too: nothing a chat started outlives it. Windows never ends a
+// child when its parent dies, so without this a helper whose parent was killed ran on for days
+// (2026-11-07: 75 Convex `cvx-node-executor` node.exe, up to 94 h old, their backend long gone).
+// When adopt stops (procs is nil), adopted work runs on at low priority, without a cap.
+func (l *lane) close(gov *Governor, why string, procs map[uint32]procInfo) {
 	l.done = true
+	ended := 0
+	if procs != nil {
+		ended = l.end(procs)
+	}
 	pids := l.pids()
 	if l.demoted {
 		restoreThreads(pids, l.lowered)
@@ -273,9 +281,37 @@ func (l *lane) close(gov *Governor, why string) {
 		"peak_mb": js.PeakMB, "read_mb": js.ReadMB, "write_mb": js.WriteMB,
 		"held_ms": int(l.heldS * 1000), "holds": l.holds, "cpu_wait_ms": int(l.cpuWaitS * 1000),
 		"short_cpu_ms": int(max(0, js.CPUSeconds-seenInJobs) * 1000), "top": strings.Join(top, ", "),
+		"ended": ended,
 	})
 	l.jobs.release()
 	gov.Close(l.unit)
+}
+
+// end stops everything left in the lane: every process in its jobs (and the jobs nested in them),
+// every process that refused a job, and anything below those that has not been placed yet. It
+// returns how many processes it stopped.
+func (l *lane) end(procs map[uint32]procInfo) int {
+	left := l.pids()
+	for p := range l.pids() {
+		for _, d := range descendants(procs, p) {
+			left[d] = true
+		}
+	}
+	for _, j := range l.jobs.handles() {
+		windows.TerminateJobObject(j, 1)
+	}
+	self := windows.GetCurrentProcessId()
+	for pid := range left {
+		p, ok := procs[pid]
+		if !ok || pid == self || pid == l.harness || (p.created != 0 && p.created != creationTime(pid)) {
+			continue // gone, or the ID now names another process
+		}
+		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid); err == nil {
+			windows.TerminateProcess(h, 1)
+			windows.CloseHandle(h)
+		}
+	}
+	return len(left)
 }
 
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }

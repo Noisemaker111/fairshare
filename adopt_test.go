@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
 // Two fake chats (cmd.exe stands in for the harness): one runs twice as many busy threads as the
@@ -169,4 +171,78 @@ func laneRun2(t *testing.T, balance bool) (heavyLane, lightLane map[string]any) 
 		t.Skipf("the PC was too busy to measure sharing: these chats got %.0f%% of it (need a third); run again when it is quieter", 100*got/pc)
 	}
 	return h, l
+}
+
+// orphanChat starts a fake chat (cmd.exe) whose work starts a long-lived child and dies, as
+// convex-local-backend leaves its node executors when it is killed, then lives pingSecs more. It
+// returns the chat; orphanPID reads the orphan's process ID once the work has started it.
+func orphanChat(t *testing.T, pingSecs int) *exec.Cmd {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "orphan.pid")
+	chat := exec.Command("cmd", "/c", fmt.Sprintf("%s & ping -n %d 127.0.0.1 >nul", os.Args[0], pingSecs+1))
+	chat.Env = append(os.Environ(), "FAIRSHARE_TEST_HELPER=orphan-parent", "FAIRSHARE_TEST_PIDFILE="+pidFile)
+	if err := chat.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { chat.Process.Kill() })
+	return chat
+}
+
+func orphanPID(t *testing.T, chat *exec.Cmd) uint32 {
+	t.Helper()
+	b, err := os.ReadFile(chat.Env[len(chat.Env)-1][len("FAIRSHARE_TEST_PIDFILE="):])
+	if err != nil {
+		t.Fatal("the chat's work never started its child:", err)
+	}
+	var pid uint32
+	fmt.Sscan(string(b), &pid)
+	t.Cleanup(func() {
+		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid); err == nil {
+			windows.TerminateProcess(h, 1)
+			windows.CloseHandle(h)
+		}
+	})
+	return pid
+}
+
+// When a chat ends, everything left in its lane ends with it, even a process whose parent died
+// long before (2026-11-07: 75 orphaned Convex executors, up to 94 h old).
+func TestNothingAChatStartedOutlivesTheChat(t *testing.T) {
+	bin := fairshareBin(t)
+	chat := orphanChat(t, 2)
+	adopt := exec.Command(bin, "adopt", "--for", "10s", "--pid", fmt.Sprint(chat.Process.Pid))
+	events := filepath.Join(t.TempDir(), "events.jsonl")
+	adopt.Env = append(os.Environ(), "FAIRSHARE_EVENTS="+events)
+	if err := adopt.Start(); err != nil {
+		t.Fatal(err)
+	}
+	chat.Wait() // the work's parent died at about 4 s; the chat ends at about 6 s
+	orphan := orphanPID(t, chat)
+	deadline := time.Now().Add(3 * time.Second)
+	for alive(orphan) && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if alive(orphan) {
+		t.Errorf("process %d, orphaned in the chat's lane, outlived the chat", orphan)
+	}
+	adopt.Wait()
+	if l := laneEvents(t, events)[float64(chat.Process.Pid)]; l == nil || l["ended"].(float64) < 1 {
+		t.Errorf("the lane event should count what it ended: %v", l)
+	}
+}
+
+// adopt stopping is not the chat ending: work it adopted runs on.
+func TestAdoptStoppingLeavesTheChatsWorkRunning(t *testing.T) {
+	bin := fairshareBin(t)
+	chat := orphanChat(t, 10)
+	adopt := exec.Command(bin, "adopt", "--for", "6s", "--pid", fmt.Sprint(chat.Process.Pid))
+	adopt.Env = append(os.Environ(), "FAIRSHARE_EVENTS="+filepath.Join(t.TempDir(), "events.jsonl"))
+	if out, err := adopt.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	orphan := orphanPID(t, chat)
+	time.Sleep(500 * time.Millisecond)
+	if !alive(orphan) {
+		t.Errorf("process %d died when adopt stopped; adopted work must survive it", orphan)
+	}
 }
