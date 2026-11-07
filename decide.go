@@ -479,8 +479,8 @@ func (r *ruleSet) add(name string) {
 }
 
 var (
-	// Words that are the shell's own, not a program `slot` could start.
-	builtinsBash = set("cd", "export", "source", ".", "echo", "printf", "set", "unset", "eval", "exec", "read", "test", "[", "[[", "if", "for", "while", "until", "case", "function", "{", "(", "!", "true", "false", ":", "wait", "kill", "trap", "local", "declare", "alias", "type", "command", "builtin", "pushd", "popd", "time", "exit", "return", "shift", "ulimit", "umask", "jobs", "fg", "bg", "disown", "hash", "history", "let")
+	// Words that are the shell's own, not a program `slot` could start, and sleep, which is a wait, not work.
+	builtinsBash = set("cd", "export", "source", ".", "echo", "printf", "set", "unset", "eval", "exec", "read", "test", "[", "[[", "if", "for", "while", "until", "case", "function", "{", "(", "!", "true", "false", ":", "wait", "kill", "trap", "local", "declare", "alias", "type", "command", "builtin", "pushd", "popd", "time", "exit", "return", "shift", "ulimit", "umask", "jobs", "fg", "bg", "disown", "hash", "history", "let", "sleep")
 	builtinsPwsh = set("cd", "echo", "cat", "ls", "dir", "rm", "del", "cp", "copy", "mv", "move", "pwd", "type", "gc", "gci", "gi", "sc", "ac", "where", "select", "sort", "kill", "ps", "sleep", "mkdir", "md", "rmdir", "rd", "clear", "cls", "man", "help", "foreach", "%", "?", "if", "for", "while", "switch", "function", "try", "exit", "return", "set", "start", "write", "tee", "measure", "diff", "iex", "(", "{", "[", "$", ".", "&")
 	verbNoun     = regexp.MustCompile(`^[A-Za-z]+-[A-Za-z]+$`) // a PowerShell cmdlet
 	writesFile   = regexp.MustCompile(`(?:^|[^&\d<>])\d?>>?\s*[^&\s]`)
