@@ -42,13 +42,13 @@ func TestARepoCanSayACheckTakesItsOwnSlot(t *testing.T) {
 func TestTheHookLeavesASelfSlottingCheckToItself(t *testing.T) {
 	bg := map[string]any{"run_in_background": true}
 	own := repoWith(t, `{"ownSlot": ["bun run lane:close"]}`)
-	if d := testCall(t, own, "bun run lane:close", "bash", "claude", bg); slicesContains(d.Rules, "heavy-slot") {
+	if d := testCall(t, own, "bun run lane:close", "bash", "claude", bg); slicesContains(d.Rules, "slot") {
 		t.Error("the repository takes its own slot:", d)
 	}
-	if d := testCall(t, repoWith(t, ""), "bun run lane:close", "bash", "claude", bg); !slicesContains(d.Rules, "heavy-slot") {
+	if d := testCall(t, repoWith(t, ""), "bun run lane:close", "bash", "claude", bg); !slicesContains(d.Rules, "slot") {
 		t.Error("an older checkout without the file still waits:", d)
 	}
-	if d := testCall(t, own, "bun run check", "bash", "claude", bg); !slicesContains(d.Rules, "heavy-slot") {
+	if d := testCall(t, own, "bun run check", "bash", "claude", bg); !slicesContains(d.Rules, "slot") {
 		t.Error("an unlisted check still waits:", d)
 	}
 }

@@ -162,10 +162,34 @@ func cmdReport(args []string) int {
 				e.num("peak_cores"), e.num("peak_mb"), e.num("procs"), e.num("held_ms")/1000, e.num("cpu_wait_ms")/1000, clip(e.str("top"), 90))
 		}
 	}
+	reportHeavy(evs)
 	for _, e := range adopts {
 		fmt.Printf("\nadopt ran %.1f min and used %.1f s CPU itself (%.2f%% of one core) over %.0f looks\n", e.num("wall_ms")/60000, e.num("self_cpu_ms")/1000, 100*e.num("self_cpu_ms")/max(1, e.num("wall_ms")), e.num("ticks"))
 	}
 	return 0
+}
+
+// reportHeavy shows the heavy list (heavy.go) and what joined it in the window.
+func reportHeavy(evs []event) {
+	list, err := readHeavy()
+	if err != nil {
+		fmt.Printf("\nheavy list: %v\n", err)
+		return
+	}
+	var added []event
+	for _, e := range evs {
+		if e.str("ev") == "heavy" {
+			added = append(added, e)
+		}
+	}
+	fmt.Printf("\nheavy list: %d commands wait for a slot (%s); %d joined in this window\n", len(list), heavyFile(), len(added))
+	for _, e := range added {
+		fmt.Printf("  joined %s  cpu %6.0fs  %s: %s\n", e.str("ts")[:16], e.num("cpu_ms")/1000, e.str("repo"), clip(e.str("cmd"), 90))
+	}
+	slices.SortFunc(list, func(a, b heavyEntry) int { return int(b.CPUSeconds - a.CPUSeconds) })
+	for _, e := range list {
+		fmt.Printf("  cpu %6.0fs wall %5.0fs peak %5.0f MB runs %3d last %s  %s: %s\n", e.CPUSeconds, e.WallSeconds, e.PeakMB, e.Runs, clip(e.LastSeen, 10), e.Repo, clip(e.Cmd, 90))
+	}
 }
 
 func joinCounts(c counter) string {
