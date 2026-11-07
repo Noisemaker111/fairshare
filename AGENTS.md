@@ -9,6 +9,9 @@ instead of exhausting memory, and is computed once per code state. See `README.m
 go vet ./... && go test ./... && go build -o fairshare.exe .
 ```
 
+Run it as written or with its output sent to a file. `go test ./... | tail` passes on tail's exit code,
+so the `&&` after it builds anyway and a failing run looks green (2026-11-07).
+
 The bench is the real check of the foreground claim. It puts load on the whole PC, so keep runs
 under 10 minutes and never run it while Jon is gaming:
 

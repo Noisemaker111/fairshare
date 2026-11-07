@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/binary"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/Noisemaker111/fairshare/internal/windows"
@@ -52,6 +53,21 @@ type procInfo struct {
 	name    string
 	created uint64 // start time; with the ID it names one process even after the ID is reused
 }
+
+// starting says Windows may still be starting the process: it appeared less than settleTime ago.
+// adopt and exec leave such a process for their next look. Windows puts a Store app (the Store
+// PowerShell, which Codex runs every hook through) into its package's job while it starts it; a
+// job fairshare gives it first makes that fail, and the program that started it gets "Access is
+// denied" and nothing runs. 2026-11-07, 150 Store pwsh starts each: 0 failed with no adopt
+// watching, 5 under the PC's adopt, 12 under a second, test adopt. Its children are already in
+// whatever job it ends up in, so waiting a moment lets nothing escape.
+func starting(created uint64) bool {
+	const fileTimeUnixEpoch = 116444736000000000 // 100 ns steps from 1601 to 1970
+	now := uint64(time.Now().UnixNano()/100 + fileTimeUnixEpoch)
+	return created != 0 && now < created+uint64(settleTime/100)
+}
+
+const settleTime = time.Second
 
 var snapBuf []byte // grows to fit; made on first use, so commands that never list processes (the hook) skip it
 
