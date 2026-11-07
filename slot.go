@@ -55,6 +55,8 @@ type slotHolder struct {
 	Since string `json:"since"`
 	// Machine is the boat machine a boat lease holder started, once boat reported it.
 	Machine string `json:"machine,omitempty"`
+	// Started is set once a boat lease holder was let through to start its machine.
+	Started bool `json:"started,omitempty"`
 }
 
 // heavySlot is a held slot; release it with Close (exiting does the same).

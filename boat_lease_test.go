@@ -215,3 +215,34 @@ func TestBoatLeaseRunsACommand(t *testing.T) {
 		t.Fatalf("the lease did not name the machine the command printed: %s", logged)
 	}
 }
+
+// Two runs waiting with one place free (the cap is 2 and one machine runs without a lease): exactly
+// one starts, at once, and the other starts when the machine ends. Counting a fellow waiter as a
+// machine left both waiting while the place stayed free, until every unleased machine had ended.
+func TestBoatLeaseWaitersShareTheLastPlace(t *testing.T) {
+	if label := os.Getenv("FAIRSHARE_TEST_LEASE"); label != "" {
+		os.Exit(cmdLease([]string{"boat", "--label", label}))
+	}
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("BOAT_MAX_MACHINES", "2")
+	t.Setenv(heldEnv, "")
+	setList := fakeBoatList(t, "bx_other01")
+
+	a := startLeaseIn(t, "TestBoatLeaseWaitersShareTheLastPlace", "gate a")
+	b := startLeaseIn(t, "TestBoatLeaseWaitersShareTheLastPlace", "gate b")
+	held, waiting := 0, []*leaseHelper{}
+	for _, h := range []*leaseHelper{a, b} {
+		if holds(h, 6*time.Second) {
+			held++
+		} else {
+			waiting = append(waiting, h)
+		}
+	}
+	if held != 1 {
+		t.Fatalf("%d of 2 waiters started with one place free; want exactly 1", held)
+	}
+	setList("")
+	if !holds(waiting[0], 20*time.Second) {
+		t.Fatal("the second waiter did not start after the unleased machine ended")
+	}
+}
