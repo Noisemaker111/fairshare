@@ -330,7 +330,8 @@ func heavyNote(e heavyEntry) string {
 	return fmt.Sprintf("it is on the heavy list (%s: %.0f CPU-seconds on its last run, listed %s)", heavyFile(), e.CPUSeconds, day)
 }
 
-// boatHint points a waiting or refused check at a cloud Linux machine (the boat skill).
+// boatHint points a waiting or refused check at a cloud Linux machine (the boat skill), through a
+// boat lease so it keeps to the PC's two machines, and with --no-env so no stored login goes along.
 func boatHint(cmd string) string {
-	return fmt.Sprintf(" If this check runs on Linux, it can run on a boat.dev cloud machine instead: `~/.ascii/bin/boat.exe run --timeout 1200 --push . -- %s` (see the boat skill).", strings.TrimSpace(cmd))
+	return fmt.Sprintf(" If this check runs on Linux, it can run on a boat.dev cloud machine instead: `fairshare lease boat -- ~/.ascii/bin/boat.exe run --no-env --timeout 1200 --push . -- %s` (see the boat skill).", strings.TrimSpace(cmd))
 }

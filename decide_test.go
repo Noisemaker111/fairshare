@@ -288,7 +288,9 @@ func TestPathologicalInputFinishesFast(t *testing.T) {
 	testCall(t, dir, "ls C:\\"+strings.Repeat("a\\", 5000)+" x", "bash", "claude", nil)
 	testCall(t, dir, "rg "+strings.Repeat(`"`, 3)+strings.Repeat("x ", 5000), "pwsh", "codex", nil)
 	testCall(t, dir, "for x in "+strings.Repeat("a ", 5000)+"; do sleep 1; done", "bash", "claude", nil)
-	if d := time.Since(t0); d > 300*time.Millisecond {
+	// Runaway (backtracking) parsing takes many seconds here; 2 s leaves room for a PC busy with
+	// other threads' work, where a 300 ms budget failed at 642 ms (2026-11-07).
+	if d := time.Since(t0); d > 2*time.Second {
 		t.Error("took", d)
 	}
 }

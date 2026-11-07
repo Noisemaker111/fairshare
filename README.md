@@ -59,6 +59,15 @@ Review that file before sharing it.
   failed on their own time limits instead of on bugs. A slot is a lock file Windows frees when its
   holder exits, however it exits, and a waiting run names who holds each slot and how to run the
   check on a boat.dev Linux machine instead. Work started inside a slot never waits again.
+- **Keeps boat.dev to two machines at once, across every repo.** A tool that starts a boat machine
+  first runs `fairshare lease boat` and holds the lease for that machine's whole life
+  (`BOAT_MAX_MACHINES` changes the count; boat's own paid plan allows 100). Checking `boat list` and
+  then starting is not enough: a machine is missing from the list while it is created, so starts in
+  those seconds all got in, and three ran at once on 2026-11-07. Leases are slots in their own
+  queue, freed by Windows when the holder exits, so a crashed tool never keeps one. A holder names
+  its machine once boat reports it, and a lease is handed out only while the other holders plus the
+  listed machines nobody names stay under the cap, so a machine left running by a killed run still
+  counts until it ends. fairshare never deletes a machine.
 - **Learns what is heavy instead of guessing.** Every run `exec` takes, and every run the hook puts
   `fairshare slot` in front of (background runs, runs that write to a file, piped test or build
   runs), is measured. The first time one run of a command uses 120 CPU-seconds, the command joins
@@ -92,6 +101,8 @@ fairshare ceiling --what idle|spawn      how many idle processes / starts per se
 fairshare du <folders>                   real disk use, counting hardlinked files once
 fairshare inspect                        the priorities and desktop Windows gave this process
 fairshare slot bun run check             measure it; if it is on the heavy list, first wait for a slot (the hook adds this)
+fairshare lease boat --label "<what>"    wait for one of the two boat machine leases, print "held", keep it until stdin closes
+fairshare lease boat -- boat run ...     run a boat command holding a lease, for a one-off machine by hand
 ```
 
 `fairshare install` makes `adopt` part of the PC rather than of one agent: a scheduled task (no
