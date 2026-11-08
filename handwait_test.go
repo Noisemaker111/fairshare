@@ -38,6 +38,11 @@ var realHandWaits = map[string]struct{ shell, cmd string }{
 var notHandWaits = map[string]struct{ shell, cmd string }{
 	"dev server log, 2 min": {"bash", `for i in $(seq 1 40); do grep -q -i "ready\|functions ready\|error" .scratch/convex-dev.log && break; sleep 3; done; tail -8 .scratch/convex-dev.log`},
 	"heredoc mentions node": {"bash", "cat > fn.txt <<'EOF'\nnode -e 'setInterval(()=>fs.readFileSync(f),1000)'\nEOF\nwc -l fn.txt"},
+	"program closing, 60 s": {"pwsh", `Start-Process "C:\Program Files (x86)\Steam\steam.exe" -ArgumentList "-shutdown"; $t = 0; while ((Get-Process steam -ErrorAction SilentlyContinue) -and $t -lt 60) { Start-Sleep 2; $t += 2 }; "steam down after ${t}s"; Start-Process steam.exe; Start-Sleep 10`},
+	"file appears, 5 s":     {"pwsh", `$deadline=(Get-Date).AddSeconds(5); while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }; Get-Content $out`},
+	"UI steps":              {"pwsh", "$closed=0\nforeach($pass in 1..3){ foreach($t in $tabs){ $b.Invoke(); Start-Sleep -Milliseconds 150 } }\nfor($i=0;$i -lt 30;$i++){ $tab=$tabs[$i]; if(-not $tab){ break }; $tab.Select() }\nStart-Sleep 2\n$s=Get-Date"},
+	"commit message":        {"bash", "git commit -q -F - <<'EOF'\nSend back `fairshare await` typed by hand\nEOF"},
+	"node edit script":      {"bash", `node -e 'const fs=require("fs");const p="a.mjs";let s=fs.readFileSync(p,"utf8");s=s.replace("x","setTimeout(f, 10)");fs.writeFileSync(p,s)'`},
 	"server readiness":      {"bash", `for i in $(seq 1 30); do curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/ | grep -q 200 && break; sleep 2; done; curl -s http://localhost:3001/`},
 	"sampling":              {"bash", `for i in 1 2 3 4 5; do nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader; sleep 1; done`},
 	"retries over a list":   {"bash", "for i in 1 2 3; do curl -s x; sleep 5; done"},
