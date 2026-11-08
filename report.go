@@ -19,7 +19,7 @@ import (
 
 type event map[string]any
 
-func (e event) str(k string) string { s, _ := e[k].(string); return s }
+func (e event) str(k string) string  { s, _ := e[k].(string); return s }
 func (e event) num(k string) float64 { return num(e[k]) }
 
 func readEvents(since time.Time) []event {
@@ -162,11 +162,43 @@ func cmdReport(args []string) int {
 				e.num("peak_cores"), e.num("peak_mb"), e.num("procs"), e.num("held_ms")/1000, e.num("cpu_wait_ms")/1000, clip(e.str("top"), 90))
 		}
 	}
+	reportSlots(evs)
 	reportHeavy(evs)
 	for _, e := range adopts {
 		fmt.Printf("\nadopt ran %.1f min and used %.1f s CPU itself (%.2f%% of one core) over %.0f looks\n", e.num("wall_ms")/60000, e.num("self_cpu_ms")/1000, 100*e.num("self_cpu_ms")/max(1, e.num("wall_ms")), e.num("ticks"))
 	}
 	return 0
+}
+
+// reportSlots shows what heavy-job slots cost: minutes waited per heavy run, against those runs'
+// own wall time and failures, and how many ran beside two or more others (the room rule, room.go).
+// Compare windows before and after a slot change with --hours.
+func reportSlots(evs []event) {
+	var runs, refused, failed int
+	var waited, wall float64
+	beside := counter{}
+	for _, e := range evs {
+		if ev := e.str("ev"); ev != "slot" && ev != "run" || e["waited_ms"] == nil {
+			continue
+		}
+		waited += e.num("waited_ms")
+		if e.str("stopped") == "no-slot" {
+			refused++
+			continue
+		}
+		runs++
+		wall += e.num("wall_ms")
+		if e.num("exit") != 0 {
+			failed++
+		}
+		beside[fmt.Sprint(e.num("slots_beside"))]++
+	}
+	if runs+refused == 0 {
+		return
+	}
+	fmt.Printf("\nheavy runs: %d · %d refused for no slot · slot wait %.1f min (%.2f min per run) · wall %.2f min per run · failed %d (%.0f%%)\n",
+		runs, refused, waited/60000, waited/60000/float64(max(1, runs)), wall/60000/float64(max(1, runs)), failed, 100*float64(failed)/float64(max(1, runs)))
+	fmt.Printf("  granted beside n others: %s\n", joinCounts(beside))
 }
 
 // reportHeavy shows the heavy list (heavy.go) and what joined it in the window.
