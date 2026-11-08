@@ -44,7 +44,9 @@ pass that way. A test's own `adopt` always takes `--pid`, and a test never runs 
   (`lane.end`).
 - Put processes in jobs through a `jobSet` (jobset.go), never `AssignProcessToJobObject` directly.
   A process already in a job can only join an empty job, and that nests the new job inside the old
-  one. The Store PowerShell is always in its package's job.
+  one. Never place a process Windows is still starting (`procInfo.unstarted`: its one thread not
+  yet let run). Two jobs on a Store PowerShell in that window make its start fail with "Access is
+  denied"; judge it by the thread, never by a wait on the clock (see `unstarted`).
 - List processes with `snapshot()` / `scan()` (one NtQuerySystemInformation call), not Toolhelp,
   which makes the same call and copies it: 5.4 ms against 2.5 ms per look.
 - Measure process CPU with `GetProcessTimes` (see `pidsCPU`), and time sub-millisecond work with

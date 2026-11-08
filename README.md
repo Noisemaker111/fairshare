@@ -129,7 +129,9 @@ chat starts is that chat's work. The rule is in `chat.go`; the hook uses it too,
 logged against its chat.
 
 `adopt` puts each process started under a chat into that chat's lane; whatever it starts
-afterwards is in the lane too. The chat's own process stays at normal priority, so the agent's own
+afterwards is in the lane too. It waits until Windows has let the process's first thread run:
+a Store PowerShell given two jobs before then fails to start with "Access is denied" (4 of 150
+starts with two placers and no wait, 0 with it). The chat's own process stays at normal priority, so the agent's own
 loop stays quick. When the chat's process exits, everything still in its lane ends. If `adopt`
 itself stops, work it adopted runs on at its low priority.
 
