@@ -58,8 +58,8 @@ Review that file before sharing it.
   timer, `timeout 590 tail -f`, or `fairshare await` typed by hand) is answered with the tool's own
   background option and its completion notice instead. Such waits run to their timeout while the
   job is still going and get run again: about 150 minutes of reruns in the two days to 2026-11-08.
-  Server readiness loops (`curl`), loops over a fixed list, and anything already in the background
-  pass.
+  Server readiness loops (`curl`), loops over a fixed list, polls that give up within 3 minutes,
+  and anything already in the background pass.
 - **Explains a PowerShell call that never started.** Claude's PowerShell tool sometimes fails with
   only "Access is denied." (11 times in 8 chats on 2026-11-07). The hook, on Claude's
   `PostToolUseFailure`, adds that nothing ran, and for a CPU-load or process check points to Owl's
