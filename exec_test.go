@@ -130,8 +130,10 @@ func TestSilentBusyRunIsNotHung(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "done") || ev["stopped"] != nil {
 		t.Errorf("%d %q %v", code, out, ev)
 	}
-	// the Store PowerShell breaks out of the run's job; it must land in a side job, counted
-	if ev["outside_job"] != nil || ev["cpu_ms"].(float64) < 10000 {
+	// the Store PowerShell breaks out of the run's job; it must land in a side job, counted. Uncounted,
+	// its 20 s loop shows as next to no CPU; counted, it can get as little as 8 s of a core while the
+	// full suite and other chats load this PC (8.25 s with 5 s starved on 2026-11-08), so the floor is 4 s.
+	if ev["outside_job"] != nil || ev["cpu_ms"].(float64) < 4000 {
 		t.Errorf("busy PowerShell escaped the run's jobs or went uncounted: %v", ev)
 	}
 }

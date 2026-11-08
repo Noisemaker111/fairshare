@@ -180,6 +180,42 @@ func TestBoatLeaseCountsMachinesNoLeaseNames(t *testing.T) {
 	}
 }
 
+// The long-lived T3 host (named "t3-host") is not a check machine: listed, it takes no place in the
+// cap, while a listed machine with no name still does. Counted, the host left every boat check
+// across all threads one machine (2026-11-08). BOAT_LEASE_IGNORE_NAMES changes the names.
+func TestBoatLeaseIgnoresTheT3Host(t *testing.T) {
+	if label := os.Getenv("FAIRSHARE_TEST_LEASE"); label != "" {
+		os.Exit(cmdLease([]string{"boat", "--label", label}))
+	}
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("BOAT_MAX_MACHINES", "2")
+	t.Setenv(heldEnv, "")
+	t.Setenv("BOAT_LEASE_IGNORE_NAMES", "") // restored after the test
+	os.Unsetenv("BOAT_LEASE_IGNORE_NAMES")  // unset: the default, "t3-host"
+	fakeBoatList(t, "bx_host0001=t3-host bx_orphan1")
+
+	a := startLeaseIn(t, "TestBoatLeaseIgnoresTheT3Host", "gate a")
+	if !holds(a, 4*time.Second) {
+		t.Fatal("the T3 host and one leftover machine are listed with a cap of 2: the host took a place")
+	}
+	b := startLeaseIn(t, "TestBoatLeaseIgnoresTheT3Host", "gate b")
+	if holds(b, 3*time.Second) {
+		t.Fatal("a second lease was held while one holder and one unnamed leftover machine filled the cap of 2")
+	}
+
+	listed, err := listedMachines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(listed, " ") != "bx_orphan1" {
+		t.Fatalf("listed machines by default = %q, want only the unnamed leftover", listed)
+	}
+	t.Setenv("BOAT_LEASE_IGNORE_NAMES", "other-host, spare")
+	if listed, _ := listedMachines(); strings.Join(listed, " ") != "bx_host0001 bx_orphan1" {
+		t.Fatalf("with BOAT_LEASE_IGNORE_NAMES naming other machines, listed = %q, want both", listed)
+	}
+}
+
 func describeHoldersJSON(t *testing.T) string {
 	t.Helper()
 	var all []string

@@ -15,7 +15,8 @@ package main
 // A machine can outlive its lease: the run that held it was killed while `boat run` went on, or a
 // machine was started without a lease. So the lease is handed over only once the other holders plus
 // the listed machines no lease names are fewer than the cap. Such machines are counted, never
-// deleted: they may be someone's work.
+// deleted: they may be someone's work. The T3 host is not a check machine and is never counted
+// (ignoredMachineNames).
 
 import (
 	"bufio"
@@ -58,7 +59,26 @@ func boatExe() string {
 	return filepath.Join(home, ".ascii", "bin", "boat.exe")
 }
 
-// listedMachines is the ids `boat list` shows now.
+// ignoredMachineNames are the boat machine names that are not check machines and take no place in
+// the cap: BOAT_LEASE_IGNORE_NAMES, comma-separated, else "t3-host". That is the long-lived machine
+// T3 threads run on (~/.config/boat-host/config.env, BOAT_HOST_NAME); counted, it took one of the two
+// places for good and every boat check across all threads got one machine (2026-11-08). Set the
+// variable empty to count every machine.
+func ignoredMachineNames() map[string]bool {
+	list, set := os.LookupEnv("BOAT_LEASE_IGNORE_NAMES")
+	if !set {
+		list = "t3-host"
+	}
+	names := map[string]bool{}
+	for _, n := range strings.Split(list, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			names[n] = true
+		}
+	}
+	return names
+}
+
+// listedMachines is the ids `boat list` shows now, less the machines whose name is ignored.
 func listedMachines() ([]string, error) {
 	cmd := exec.Command(boatExe(), "list", "--json")
 	cmd.Stdin = nil
@@ -80,15 +100,19 @@ func listedMachines() ([]string, error) {
 	}
 	var parsed struct {
 		Sandboxes []struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
 		} `json:"sandboxes"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("boat list printed no JSON: %s", clip(string(out), 200))
 	}
+	ignored := ignoredMachineNames()
 	ids := make([]string, 0, len(parsed.Sandboxes))
 	for _, s := range parsed.Sandboxes {
-		ids = append(ids, s.ID)
+		if !ignored[s.Name] {
+			ids = append(ids, s.ID)
+		}
 	}
 	return ids, nil
 }

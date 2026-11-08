@@ -85,7 +85,9 @@ Review that file before sharing it.
   queue, freed by Windows when the holder exits, so a crashed tool never keeps one. A holder names
   its machine once boat reports it, and a lease is handed out only while the other holders plus the
   listed machines nobody names stay under the cap, so a machine left running by a killed run still
-  counts until it ends. fairshare never deletes a machine.
+  counts until it ends. fairshare never deletes a machine. The long-lived machine T3 threads run on
+  (named `t3-host`) is not a check machine and is left out of the count; `BOAT_LEASE_IGNORE_NAMES`
+  (comma-separated) changes which names are left out.
 - **Learns what is heavy instead of guessing.** Every run `exec` takes, and every run the hook puts
   `fairshare slot` in front of (background runs, runs that write to a file, piped test or build
   runs), is measured. The first time one run of a command uses 120 CPU-seconds, the command joins
