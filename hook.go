@@ -57,9 +57,29 @@ func toCall(agent string, p hookPayload) Call {
 	return c
 }
 
+// pendingNote is a line for the agent (lowdisk.go) that rides on the hook's reply: Claude reads it
+// as additionalContext; the other agents get it on stderr.
+var pendingNote string
+
+// noteOnly is the reply of a call that passes unchanged but carries pendingNote.
+func noteOnly(agent string) {
+	if pendingNote == "" {
+		return
+	}
+	if agent != "claude" {
+		fmt.Fprintln(os.Stderr, pendingNote)
+		return
+	}
+	b, _ := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "additionalContext": pendingNote}})
+	os.Stdout.Write(b)
+}
+
 // answer is the hook's reply in the agent's protocol.
 func answer(agent string, p hookPayload, d Decision) map[string]any {
 	out := map[string]any{"hookEventName": "PreToolUse"}
+	if pendingNote != "" && agent == "claude" {
+		out["additionalContext"] = pendingNote
+	}
 	if d.Kind == "deny" {
 		out["permissionDecision"] = "deny"
 		out["permissionDecisionReason"] = "[fairshare] " + d.Reason
@@ -123,6 +143,7 @@ func cmdHook(args []string) int {
 	if p.Event != "" && p.Event != "PreToolUse" {
 		return 0
 	}
+	pendingNote = lowDiskCheck(time.Now())
 	// chat_pid ties the call to its chat's lane (adopt names lanes by harness process). Only logged
 	// calls look it up: a Read that waits on nothing logs nothing.
 	ev := map[string]any{"agent": agent, "tool": p.Tool, "session": p.Session, "cwd": p.Cwd}
@@ -137,6 +158,7 @@ func cmdHook(args []string) int {
 			ev["chat_pid"], ev["hook_ms"], ev["proc_ms"] = chat(), time.Since(t0).Milliseconds(), sinceProcessStart()
 			logEvent("call", ev)
 		}
+		noteOnly(agent)
 		return 0
 	}
 
@@ -163,6 +185,11 @@ func cmdHook(args []string) int {
 		if err == nil {
 			os.Stdout.Write(b)
 		}
+		if agent != "claude" && pendingNote != "" {
+			fmt.Fprintln(os.Stderr, pendingNote)
+		}
+	} else {
+		noteOnly(agent)
 	}
 	ev["chat_pid"], ev["hook_ms"], ev["proc_ms"] = chat(), time.Since(t0).Milliseconds(), sinceProcessStart()
 	logEvent("call", ev)
