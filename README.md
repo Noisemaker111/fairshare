@@ -214,6 +214,26 @@ Testing trap: `adopt --pid` also adopts the harness's shells that already exist,
 work keeps its low priority after `adopt` stops. A "plain" run started from the same shell
 afterwards is not plain; start each run from a fresh shell.
 
+### Heavy-job slots: how many at once (2026-11-08)
+
+`fairshare bench slots` on appforgutters' backend suite (vitest, 1,806 tests with 30 s time
+limits), while the other chats kept the PC at 26–95% CPU. Wall time per copy, in seconds:
+
+| copies at once | all cores each (round 0) | 4 workers each, round 0 | 4 workers each, round 1 |
+|---|---|---|---|
+| 1 | 64 | 215 | 192 |
+| 2 | 125, 111 (one failed: 7 tests timed out) | 138, 136 | 238, 250 |
+| 3 | 104, 103, 143 (two failed: timeouts) | 159, 159, 160 | 186, 186, 175 |
+| 4 | not run | 271, 266, 298, 325 | 301, 331, 308, 317 |
+
+The all-core copies started with the PC already at 99–100% CPU and failed the way six full suites
+did on 2026-11-03. That run was stopped there rather than load the other chats' checks further.
+No 4-worker copy failed. Three at once took about as long per copy as two. Four took longer each
+but finished four jobs in about the time two-at-a-time takes for four, with the PC at 90–92% CPU,
+so four is the most. The room rule keeps the third and fourth for when the PC has the cores
+free: with 4 cores kept idle it would have refused the all-core copies and the fourth 4-worker copy
+once the PC passed about 80%.
+
 ### Lanes: a 48-thread chat against a 2-thread chat (2026-10-29)
 
 `fairshare bench lanes`: each chat in its own idle-priority job, 5 s per slice, in the order
