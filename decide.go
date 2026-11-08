@@ -25,8 +25,9 @@ var limits = struct {
 	ClaudeMaxMs                  int // Claude's longest foreground timeout
 	CodexYieldMs                 int // minimum wait for an empty write_stdin / cell wait
 	RgColumns                    int
-	ScanSeconds                  int // a drive or home-folder find is cut off after this
-}{800, 60000, 200, 590, 600000, 30000, 400, 45}
+	ScanSeconds                  int     // a drive or home-folder find is cut off after this
+	ShortPollS                   float64 // a capped poll loop that gives up within this many seconds is not a hand-made wait
+}{800, 60000, 200, 590, 600000, 30000, 400, 45, 180}
 
 // Call is one tool call as the hook sees it.
 type Call struct {

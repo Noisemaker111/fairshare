@@ -8,6 +8,8 @@ package main
 // a person may approve it, even with permissions bypassed. The chat then sits idle until Jon
 // answers: `rm -rf "$S/$p"` waited 200 minutes on 2026-10-28 and was declined. That prompt skips
 // PermissionRequest hooks, so the only place to catch it is before the call.
+//
+// hand-wait (Claude): a foreground command that only polls for another job to finish (handwait.go).
 
 import (
 	"fmt"
@@ -193,6 +195,11 @@ func sendBack(c Call, cmd string) (Decision, bool) {
 				"until he answers (one waited 200 minutes). The target %s is unsafe: %s. Write each path out in full, "+
 				"or start it with a fixed folder (`rm -rf \"/c/work/$name\"`); to empty a folder, delete what is inside it by name.",
 			target, why)}, true
+	}
+	if !truthy(c.Input["run_in_background"]) {
+		if what := handWait(cmd, c.Shell); what != "" {
+			return Decision{Kind: "deny", Rules: []string{"hand-wait"}, Reason: fmt.Sprintf(handWaitReason, what)}, true
+		}
 	}
 	return Decision{}, false
 }
