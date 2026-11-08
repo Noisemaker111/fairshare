@@ -151,6 +151,25 @@ func TestSlotNeverPrefixesShellKeywords(t *testing.T) {
 	}
 }
 
+// Every bash builtin runs inside the shell: `slot break` execs a program named break, which does not
+// exist, so a background `curl -s x && break` wait loop never left its loop (2026-11-08).
+func TestSlotNeverPrefixesBashBuiltins(t *testing.T) {
+	dir := t.TempDir()
+	bg := map[string]any{"run_in_background": true}
+	// bash 5's `enable -a` list, less the punctuation ones.
+	builtins := strings.Fields(`alias bg bind break builtin caller cd command compgen complete compopt continue
+		declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history jobs kill
+		let local logout mapfile popd printf pushd pwd read readarray readonly return set shift shopt source
+		suspend test times trap true type typeset ulimit umask unalias unset wait`)
+	for _, b := range builtins {
+		c := "for i in 1 2; do curl -s x && " + b + " y; sleep 4; done"
+		d := testCall(t, dir, c, "bash", "claude", bg)
+		if regexp.MustCompile(`slot (?:--wait \d+ )?` + regexp.QuoteMeta(b) + `(?:\s|$)`).MatchString(d.Command) {
+			t.Errorf("slot put in front of the builtin %q:\n%s\n-> %s", b, c, d.Command)
+		}
+	}
+}
+
 func TestEarlyReadWaitsInTheSameCall(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "tasks"), 0o755)
