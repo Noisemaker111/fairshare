@@ -123,6 +123,7 @@ var (
 	getMonitorInfoW              = user32.NewProc("GetMonitorInfoW")
 	getClassNameW                = user32.NewProc("GetClassNameW")
 	getWindowThreadProcessId     = user32.NewProc("GetWindowThreadProcessId")
+	isZoomed                     = user32.NewProc("IsZoomed")
 )
 
 // fullScreenApp names what fills the screen in the foreground: a game in exclusive full screen,
@@ -144,6 +145,11 @@ func fullScreenApp() string {
 	n, _, _ := getClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&cls[0])), uintptr(len(cls)))
 	switch windows.UTF16ToString(cls[:n]) {
 	case "Progman", "WorkerW", "Shell_TrayWnd": // the desktop and taskbar
+		return ""
+	}
+	// A maximized window (a browser, an editor) covers the whole monitor when the taskbar hides
+	// itself; a borderless game is not maximized.
+	if z, _, _ := isZoomed.Call(hwnd); z != 0 {
 		return ""
 	}
 	type rect struct{ L, T, R, B int32 }

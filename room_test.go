@@ -93,5 +93,5 @@ func TestFixedSlotsOverride(t *testing.T) {
 }
 
 func TestFullScreenAppDoesNotFail(t *testing.T) {
-	_ = fullScreenApp() // a desktop session or a service with none: either way, no crash
+	t.Logf("full screen now: %q", fullScreenApp()) // a desktop session or a service with none: either way, no crash
 }
