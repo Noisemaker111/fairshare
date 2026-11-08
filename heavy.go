@@ -67,7 +67,7 @@ func readHeavy() ([]heavyEntry, error) {
 // heavyListed finds the entry for a command run in dir. A command its repository says takes its
 // own slot (ownslot.go) is never listed: it waits for a slot around its local steps itself.
 func heavyListed(dir, cmd string) (heavyEntry, bool) {
-	if ownSlot(cmd, dir) {
+	if ownSlot(cmd, dir) || freesDisk(cmd) {
 		return heavyEntry{}, false
 	}
 	list, err := readHeavy()
@@ -96,7 +96,7 @@ type heavyRun struct {
 // recordHeavy notes a measured run: a listed command's entry is brought up to date, and an
 // unlisted one joins when it used heavyCPUSeconds. It says whether the command joined now.
 func recordHeavy(r heavyRun) bool {
-	if ownSlot(r.Cmd, r.Dir) {
+	if ownSlot(r.Cmd, r.Dir) || freesDisk(r.Cmd) {
 		return false // its CPU is its own slotted steps', which are measured and listed themselves
 	}
 	if r.CPUSeconds < heavyCPUSeconds {

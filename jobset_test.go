@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,6 +23,12 @@ const (
 // The test binary doubles as a program that, told to over stdin, starts a child the way the
 // MSYS2 runtime (Git Bash) does when its job allows breakaway: with CREATE_BREAKAWAY_FROM_JOB.
 func TestMain(m *testing.M) {
+	// Run as `owl storage reclaim --apply --json` (FAIRSHARE_OWL is this binary): write the arguments
+	// to the file named by FAIRSHARE_TEST_FAKE_OWL.
+	if out := os.Getenv("FAIRSHARE_TEST_FAKE_OWL"); out != "" && len(os.Args) > 2 && os.Args[1] == "storage" {
+		os.WriteFile(out, []byte(strings.Join(os.Args[1:], " ")), 0o644)
+		os.Exit(0)
+	}
 	// Run as `boat list --json` (BOAT_EXE is this binary): list the machine ids in the file named by
 	// FAIRSHARE_TEST_BOAT_LIST, one per line.
 	if len(os.Args) > 1 && os.Args[1] == "list" && os.Getenv("FAIRSHARE_TEST_BOAT_LIST") != "" {
@@ -32,6 +39,14 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Printf("{\"sandboxes\":[%s]}\n", strings.Join(ids, ","))
 		os.Exit(0)
+	}
+	// Tests never start the PC's real reclaim: the low-disk threshold is 1 GB and owl.exe is a path
+	// that does not exist, unless a test sets its own (lowdisk_test.go).
+	if os.Getenv("FAIRSHARE_OWL_SETTINGS") == "" {
+		quiet := filepath.Join(os.TempDir(), "fairshare-test-owl-settings.json")
+		os.WriteFile(quiet, []byte(`{"storage_clean":{"reclaim_free_gb":1}}`), 0o644)
+		os.Setenv("FAIRSHARE_OWL_SETTINGS", quiet)
+		os.Setenv("FAIRSHARE_OWL", filepath.Join(os.TempDir(), "no-owl-in-tests.exe"))
 	}
 	switch os.Getenv("FAIRSHARE_TEST_HELPER") {
 	case "spawn-breakaway":
