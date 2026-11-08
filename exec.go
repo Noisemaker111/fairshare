@@ -232,15 +232,15 @@ func cmdExec(args []string) int {
 	var slot *heavySlot
 	cwd, _ := os.Getwd()
 	if entry, listed := heavyListed(cwd, cmdText); listed {
-		s, err := acquireSlot(cmdText, cwd, label, limit/2, func(holders string) { out.Write([]byte(waitNote(entry, cmdText, holders) + "\n")) })
+		s, err := acquireSlot(cmdText, cwd, label, needOf(entry), limit/2, func(holders string) { out.Write([]byte(waitNote(entry, cmdText, holders) + "\n")) })
 		if err != nil {
 			if !errors.Is(err, errBusy) {
 				fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
 				logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 1, "stopped": "queue-error"})
 				return 1
 			}
-			os.Stdout.WriteString(fmt.Sprintf("[fairshare] not started: %s within %s; %s, and the PC already runs %d heavy jobs (%s). Run it with run_in_background, where it waits its turn, or narrow it to one test file or package.%s\n",
-				errBusy, (limit / 2).Round(time.Second), heavyNote(entry), slotCount(), describeHolders(slotHolders()), boatHint(cmdText)))
+			os.Stdout.WriteString(fmt.Sprintf("[fairshare] not started: %s within %s; %s, and the PC has no room for another heavy job (%s). Run it with run_in_background, where it waits its turn, or narrow it to one test file or package.%s\n",
+				err, (limit / 2).Round(time.Second), heavyNote(entry), describeHolders(slotHolders()), boatHint(cmdText)))
 			logEvent("run", map[string]any{"label": label, "shell": shell, "cmd": clip(cmdText, 300), "exit": 124, "stopped": "no-slot", "waited_ms": (limit / 2).Milliseconds()})
 			return 124
 		}
@@ -433,6 +433,7 @@ wait:
 	}
 	if slot != nil && slot.Waited > 0 {
 		ev["waited_ms"] = slot.Waited.Milliseconds()
+		slotEvent(ev, slot)
 	}
 	for state, n := range ticks {
 		ev[state+"_s"] = n * int(every.Seconds())

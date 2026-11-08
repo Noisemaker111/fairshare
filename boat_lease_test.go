@@ -111,7 +111,7 @@ func TestBoatLeasesCapMachinesAcrossProcesses(t *testing.T) {
 	}
 
 	// The boat pool never takes from the heavy-job slots.
-	heavy, err := acquireSlot("go test ./...", "C:/repo", "", time.Second, nil)
+	heavy, err := acquireSlot("go test ./...", "C:/repo", "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal("two boat leases blocked a heavy-job slot:", err)
 	}
