@@ -40,11 +40,13 @@ var (
 
 func slotsDir() string { return filepath.Join(eventsDir(), "slots") }
 
-func slotCount() int {
+// fixedSlots is FAIRSHARE_HEAVY_SLOTS: a fixed count of heavy-job slots in place of the room rule
+// (room.go), or 0 when unset.
+func fixedSlots() int {
 	if n, err := strconv.Atoi(os.Getenv("FAIRSHARE_HEAVY_SLOTS")); err == nil && n > 0 {
 		return n
 	}
-	return 2 // 24 threads: two whole suites keep the PC busy without either starving
+	return 0
 }
 
 type slotHolder struct {
@@ -64,6 +66,8 @@ type heavySlot struct {
 	f      *os.File
 	Waited time.Duration
 	holder slotHolder
+	Beside int    // heavy jobs that held slots when this one got its own (counted under the room rule)
+	Why    string // the room rule's last reason to wait, if it waited for room
 }
 
 func (s *heavySlot) Close() {
@@ -80,10 +84,18 @@ var errBusy = errors.New("no heavy-job slot came free")
 type slotPool struct {
 	name  string // lock files are <name>-<i>.lock
 	dir   string
-	count int
+	count int // the most holders at once
+	// room, when set, is asked before a free lock file is taken: whether one more holder fits
+	// beside held, and if not, why. It is called about once a second while the waiter is first.
+	room func(held []slotHolder) (bool, string)
 }
 
-func heavyPool() slotPool { return slotPool{name: "heavy", dir: slotsDir(), count: slotCount()} }
+func heavyPool() slotPool {
+	if n := fixedSlots(); n > 0 {
+		return slotPool{name: "heavy", dir: slotsDir(), count: n}
+	}
+	return slotPool{name: "heavy", dir: slotsDir(), count: maxHeavySlots}
+}
 
 // try takes slot i if nobody holds it. Others may still read it to see who does.
 func (p slotPool) try(i int) *os.File {
@@ -145,14 +157,43 @@ func describeHolders(hs []slotHolder) string {
 	return strings.Join(parts, "; ")
 }
 
-// acquireSlot waits for a free heavy-job slot, up to maxWait (0: no limit). note is told who holds
-// the slots, once, when it has to wait. Work that already holds a slot gets an empty one at once.
-// Callers ask only for a command on the heavy list.
-func acquireSlot(cmd, cwd, label string, maxWait time.Duration, note func(string)) (*heavySlot, error) {
+// acquireSlot waits for a heavy-job slot, up to maxWait (0: no limit): one of the first two, or
+// past them one the PC has room for (room.go), judged by need, what the command used on its last
+// run. note is told who holds the slots and why it waits, once, when it has to wait. Work that
+// already holds a slot gets an empty one at once. Callers ask only for a command on the heavy list.
+func acquireSlot(cmd, cwd, label string, need heavyNeed, maxWait time.Duration, note func(string)) (*heavySlot, error) {
 	if os.Getenv(heldEnv) != "" {
 		return &heavySlot{}, nil
 	}
-	return heavyPool().acquire(cmd, cwd, label, maxWait, note)
+	p := heavyPool()
+	if fixedSlots() == 0 {
+		var w loadWatch
+		p.room = func(held []slotHolder) (bool, string) {
+			if len(held) < minHeavySlots {
+				return true, ""
+			}
+			load, ready := w.look()
+			if !ready {
+				return false, measuringLoad
+			}
+			return heavyRoom(len(held), newestHolder(held), load, need)
+		}
+	}
+	return p.acquire(cmd, cwd, label, maxWait, note)
+}
+
+// measuringLoad is the reason a waiter gives before it has looked at the PC's load long enough.
+const measuringLoad = "measuring the PC's load"
+
+// newestHolder is how long ago the most recent of held got its slot.
+func newestHolder(held []slotHolder) time.Duration {
+	newest := time.Duration(1<<63 - 1)
+	for _, h := range held {
+		if t, err := time.Parse(time.RFC3339, h.Since); err == nil {
+			newest = min(newest, time.Since(t))
+		}
+	}
+	return newest
 }
 
 // acquire waits its turn in the pool's queue for a free slot, up to maxWait (0: no limit).
@@ -177,6 +218,7 @@ func (p slotPool) acquire(cmd, cwd, label string, maxWait time.Duration, note fu
 		}
 	}()
 	told := false
+	why, waitedFor := "", ""
 	for {
 		gate, err := lockSlotQueue(p.dir, start, maxWait)
 		if err != nil {
@@ -187,7 +229,17 @@ func (p slotPool) acquire(cmd, cwd, label string, maxWait time.Duration, note fu
 			gate.Close()
 			return nil, err
 		}
-		if len(live) > 0 && live[0] == ticket.name {
+		first := len(live) > 0 && live[0] == ticket.name
+		var held []slotHolder
+		fits := true
+		if first && p.room != nil {
+			held = p.holders()
+			fits, why = p.room(held)
+			if !fits && why != measuringLoad {
+				waitedFor = why
+			}
+		}
+		if first && fits {
 			for i := range p.count {
 				f := p.try(i)
 				if f == nil {
@@ -203,18 +255,35 @@ func (p slotPool) acquire(cmd, cwd, label string, maxWait time.Duration, note fu
 					return nil, err
 				}
 				gate.Close()
-				return &heavySlot{f: f, Waited: time.Since(start), holder: holder}, nil
+				return &heavySlot{f: f, Waited: time.Since(start), holder: holder, Beside: len(held), Why: waitedFor}, nil
 			}
 		}
 		gate.Close()
-		if !told && note != nil {
-			note(describeHolders(p.holders()))
+		if !told && note != nil && why != measuringLoad {
+			text := describeHolders(p.holders())
+			if why != "" {
+				text += ". It waits because " + why
+			}
+			note(text)
 			told = true
 		}
 		if maxWait > 0 && time.Since(start) >= maxWait {
+			if waitedFor != "" {
+				return nil, fmt.Errorf("%w: %s", errBusy, waitedFor)
+			}
 			return nil, errBusy
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// slotEvent adds to a run's event how its slot was granted under the room rule.
+func slotEvent(ev map[string]any, s *heavySlot) {
+	if s.Beside > 0 {
+		ev["slots_beside"] = s.Beside
+	}
+	if s.Why != "" {
+		ev["waited_for"] = clip(s.Why, 200)
 	}
 }
 
@@ -254,14 +323,14 @@ func cmdSlot(args []string) int {
 	entry, listed := heavyListed(cwd, text)
 	if listed {
 		var err error
-		s, err = acquireSlot(text, cwd, "", maxWait, func(holders string) { fmt.Fprintln(os.Stderr, waitNote(entry, text, holders)) })
+		s, err = acquireSlot(text, cwd, "", needOf(entry), maxWait, func(holders string) { fmt.Fprintln(os.Stderr, waitNote(entry, text, holders)) })
 		if err != nil {
 			if !errors.Is(err, errBusy) {
 				fmt.Fprintf(os.Stderr, "[fairshare] not started: cannot use the heavy-job queue: %v\n", err)
 				logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "queue-error"})
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "[fairshare] not started: no heavy-job slot came free in %s. Run it with run_in_background (it then waits as long as it takes), or narrow it to the files you changed.%s\n", maxWait.Round(time.Second), boatHint(text))
+			fmt.Fprintf(os.Stderr, "[fairshare] not started: %v, in %s. Run it with run_in_background (it then waits as long as it takes), or narrow it to the files you changed.%s\n", err, maxWait.Round(time.Second), boatHint(text))
 			logEvent("slot", map[string]any{"cmd": clip(text, 300), "cwd": cwd, "stopped": "no-slot", "waited_ms": maxWait.Milliseconds()})
 			return 124
 		}
@@ -290,6 +359,7 @@ func cmdSlot(args []string) int {
 	ev := map[string]any{"cmd": clip(text, 300), "cwd": cwd, "exit": code, "wall_ms": wall.Milliseconds(), "listed": listed}
 	if listed {
 		ev["waited_ms"] = s.Waited.Milliseconds()
+		slotEvent(ev, s)
 	}
 	if jobErr == nil {
 		st := jobStats(job)

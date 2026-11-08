@@ -67,23 +67,23 @@ func TestSlotsAreLimitedAndComeBackWhenReleased(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "2")
 	t.Setenv(heldEnv, "")
-	a, err := acquireSlot("bun run check", "C:/repo-a", "", time.Second, nil)
+	a, err := acquireSlot("bun run check", "C:/repo-a", "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := acquireSlot("bun test", "C:/repo-b", "", time.Second, nil)
+	b, err := acquireSlot("bun test", "C:/repo-b", "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var said string
-	if _, err := acquireSlot("go test ./...", "C:/repo-c", "", 1500*time.Millisecond, func(m string) { said = m }); !errors.Is(err, errBusy) {
+	if _, err := acquireSlot("go test ./...", "C:/repo-c", "", heavyNeed{}, 1500*time.Millisecond, func(m string) { said = m }); !errors.Is(err, errBusy) {
 		t.Fatal("a third slot was given out:", err)
 	}
 	if !strings.Contains(said, "`bun run check` in repo-a") || !strings.Contains(said, "`bun test` in repo-b") {
 		t.Error("the wait note should name who holds the slots:", said)
 	}
 	a.Close()
-	c, err := acquireSlot("go test ./...", "C:/repo-c", "", time.Second, nil)
+	c, err := acquireSlot("go test ./...", "C:/repo-c", "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal("a released slot did not come back:", err)
 	}
@@ -93,7 +93,7 @@ func TestSlotsAreLimitedAndComeBackWhenReleased(t *testing.T) {
 	// Work that already holds a slot never waits for another one.
 	t.Setenv(heldEnv, "1")
 	for range 5 {
-		if _, err := acquireSlot("nested", "C:/x", "", time.Millisecond, nil); err != nil {
+		if _, err := acquireSlot("nested", "C:/x", "", heavyNeed{}, time.Millisecond, nil); err != nil {
 			t.Fatal("nested work waited:", err)
 		}
 	}
@@ -103,7 +103,7 @@ func TestOlderSlotWaiterStartsBeforeNewArrival(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "1")
 	t.Setenv(heldEnv, "")
-	holder, err := acquireSlot("holding", "C:/repo", "", time.Second, nil)
+	holder, err := acquireSlot("holding", "C:/repo", "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,13 +115,13 @@ func TestOlderSlotWaiterStartsBeforeNewArrival(t *testing.T) {
 	ready := make(chan struct{})
 	results := make(chan acquired, 2)
 	go func() {
-		s, e := acquireSlot("older", "C:/repo", "", 10*time.Second, func(string) { close(ready) })
+		s, e := acquireSlot("older", "C:/repo", "", heavyNeed{}, 10*time.Second, func(string) { close(ready) })
 		results <- acquired{"older", s, e}
 	}()
 	<-ready
 	holder.Close()
 	go func() {
-		s, e := acquireSlot("newer", "C:/repo", "", 10*time.Second, nil)
+		s, e := acquireSlot("newer", "C:/repo", "", heavyNeed{}, 10*time.Second, nil)
 		results <- acquired{"newer", s, e}
 	}()
 	first := <-results
@@ -180,13 +180,13 @@ func TestSlotPassesChildExitStatus(t *testing.T) {
 
 func TestKilledSlotWaiterDoesNotBlockQueue(t *testing.T) {
 	if os.Getenv("FAIRSHARE_TEST_WAIT_SLOT") == "1" {
-		_, _ = acquireSlot("abandoned", "C:/repo", "", 0, func(string) { _, _ = os.Stdout.WriteString("waiting\n") })
+		_, _ = acquireSlot("abandoned", "C:/repo", "", heavyNeed{}, 0, func(string) { _, _ = os.Stdout.WriteString("waiting\n") })
 		os.Exit(0)
 	}
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "1")
 	t.Setenv(heldEnv, "")
-	holder, err := acquireSlot("holding", "C:/repo", "", time.Second, nil)
+	holder, err := acquireSlot("holding", "C:/repo", "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestKilledSlotWaiterDoesNotBlockQueue(t *testing.T) {
 	_ = child.Process.Kill()
 	_ = child.Wait()
 	holder.Close()
-	next, err := acquireSlot("next", "C:/repo", "", 3*time.Second, nil)
+	next, err := acquireSlot("next", "C:/repo", "", heavyNeed{}, 3*time.Second, nil)
 	if err != nil {
 		t.Fatal("dead waiter blocked its successor:", err)
 	}
@@ -227,7 +227,7 @@ func TestKilledSlotWaiterDoesNotBlockQueue(t *testing.T) {
 // A run that is killed while it holds a slot must not keep it.
 func TestAKilledHolderLosesItsSlot(t *testing.T) {
 	if os.Getenv("FAIRSHARE_TEST_HOLD_SLOT") == "1" {
-		if _, err := acquireSlot("holder", "C:/held", "", time.Second, nil); err != nil {
+		if _, err := acquireSlot("holder", "C:/held", "", heavyNeed{}, time.Second, nil); err != nil {
 			os.Exit(3)
 		}
 		os.Stdout.WriteString("held\n")
@@ -250,12 +250,12 @@ func TestAKilledHolderLosesItsSlot(t *testing.T) {
 	if !strings.Contains(string(buf[:n]), "held") {
 		t.Fatal("helper never took the slot:", string(buf[:n]))
 	}
-	if _, err := acquireSlot("waiter", "C:/w", "", 1200*time.Millisecond, nil); !errors.Is(err, errBusy) {
+	if _, err := acquireSlot("waiter", "C:/w", "", heavyNeed{}, 1200*time.Millisecond, nil); !errors.Is(err, errBusy) {
 		t.Fatal("the slot was free while the helper held it:", err)
 	}
 	child.Process.Kill()
 	child.Wait()
-	s, err := acquireSlot("waiter", "C:/w", "", 3*time.Second, nil)
+	s, err := acquireSlot("waiter", "C:/w", "", heavyNeed{}, 3*time.Second, nil)
 	if err != nil {
 		t.Fatal("a killed holder kept its slot:", err)
 	}

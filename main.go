@@ -20,6 +20,7 @@ const usage = `fairshare: agent work that yields to you.
   fairshare probe [--secs 10]                measure how a game-like foreground app is doing now
   fairshare bench [flags] [-- run flags]     N heavy synthetic jobs against the probe
   fairshare bench lanes [flags]              does sharing by chat stop a 40-thread chat starving a 2-thread one
+  fairshare bench slots [flags] -- cmd...    a real heavy command 1-4 copies at once: wall time, failures, PC load
   fairshare ceiling [flags]                  how many idle processes / spawns the PC takes
   fairshare du <folders...>                  real disk use, counting hardlinked files once
   fairshare inspect                          print the priorities Windows gave this process
@@ -29,7 +30,7 @@ The thread shell (every agent tool call goes through it):
   fairshare install [--uninstall] [--hooks-only]  hook in Claude Code, Codex and OpenCode; adopt always on
   fairshare hook claude|codex|opencode       one PreToolUse payload on stdin -> pass, rewrite or send back
   fairshare exec <bash|pwsh> <b64> <ms>      run a long test/build/install with a summary and early stops
-  fairshare slot <command> [args...]         measure a command; one on the heavy list first waits for a slot (2 per PC)
+  fairshare slot <command> [args...]         measure a command; one on the heavy list first waits for a slot (2, up to 4 with room)
   fairshare lease boat [--label <what>]      hold one boat machine lease until stdin closes (BOAT_MAX_MACHINES, 2 per PC)
   fairshare lease boat -- <command>          run a boat command holding one lease
   fairshare await <file> [maxS] [quietS]     wait for a Claude background task's output to finish
@@ -53,6 +54,8 @@ func main() {
 	case "bench":
 		if len(args) > 0 && args[0] == "lanes" {
 			code = benchLanes(args[1:])
+		} else if len(args) > 0 && args[0] == "slots" {
+			code = benchSlots(args[1:])
 		} else {
 			code = cmdBench(args)
 		}

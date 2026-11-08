@@ -89,7 +89,7 @@ func TestOnlyListedCommandsWaitForASlot(t *testing.T) {
 	t.Setenv(heldEnv, "")
 	_, wt := fakeRepo(t, "https://github.com/o/p")
 	t.Chdir(wt)
-	holder, err := acquireSlot("bun run verify", `C:\repo-a`, "", time.Second, nil)
+	holder, err := acquireSlot("bun run verify", `C:\repo-a`, "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestExecWaitsOnlyForAListedCommand(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", local)
 	t.Setenv("FAIRSHARE_HEAVY_SLOTS", "1")
 	t.Setenv(heldEnv, "")
-	holder, err := acquireSlot("go test ./...", `C:\repo-b`, "", time.Second, nil)
+	holder, err := acquireSlot("go test ./...", `C:\repo-b`, "", heavyNeed{}, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

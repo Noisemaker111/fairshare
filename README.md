@@ -64,12 +64,19 @@ Review that file before sharing it.
   only "Access is denied." (11 times in 8 chats on 2026-11-07). The hook, on Claude's
   `PostToolUseFailure`, adds that nothing ran, and for a CPU-load or process check points to Owl's
   `answers whats-running`.
-- **Runs at most two heavy jobs at once on the PC.** A command on the heavy list waits for one of
-  two heavy-job slots shared by every chat and repo (`FAIRSHARE_HEAVY_SLOTS` changes the count);
-  any other command never waits. Without slots, six chats each started a full suite and tests
-  failed on their own time limits instead of on bugs. A slot is a lock file Windows frees when its
-  holder exits, however it exits, and a waiting run names who holds each slot and how to run the
-  check on a boat.dev Linux machine instead. Work started inside a slot never waits again.
+- **Runs as many heavy jobs at once as the PC has room for.** A command on the heavy list waits for
+  a heavy-job slot shared by every chat and repo; any other command never waits. Two slots are
+  always there. A third and fourth are granted only while nothing fills the screen in the
+  foreground (a game, a video), the newest heavy job has run 30 seconds (so its load shows), the
+  cores the command used on its last run leave 4 cores idle, and its last run's peak memory leaves
+  8 GB free. Without slots, six chats each started a full suite and tests failed on their own time
+  limits instead of on bugs; on 2026-11-08 two copies of an all-core test suite on a PC already at
+  99% CPU did the same (`fairshare bench slots`). A fixed two, though, left heavy commands waiting
+  2.1 minutes per run, 33 hours in the week to 2026-11-08, while the PC often sat at a third of its
+  CPU. `FAIRSHARE_HEAVY_SLOTS=<n>` fixes the count at n instead. A slot is a lock file Windows
+  frees when its holder exits, however it exits, and a waiting run names who holds each slot, why
+  it waits, and how to run the check on a boat.dev Linux machine instead. Work started inside a
+  slot never waits again.
 - **Keeps boat.dev to two machines at once, across every repo.** A tool that starts a boat machine
   first runs `fairshare lease boat` and holds the lease for that machine's whole life
   (`BOAT_MAX_MACHINES` changes the count; boat's own paid plan allows 100). Checking `boat list` and
@@ -108,6 +115,7 @@ fairshare run --normal -- strobe record …  a measurement at normal priority, o
 fairshare probe --secs 10                how a game-like foreground app is doing right now
 fairshare bench --jobs 50 --mode plain   50 heavy synthetic jobs against the probe (or --mode fair)
 fairshare bench lanes                    a 48-thread chat against a 2-thread one, under each way of sharing
+fairshare bench slots --at 1,2,3,4 -- bun run test   a real heavy command 1-4 copies at once: wall time, failures, PC load
 fairshare ceiling --what idle|spawn      how many idle processes / starts per second the PC takes
 fairshare du <folders>                   real disk use, counting hardlinked files once
 fairshare inspect                        the priorities and desktop Windows gave this process
