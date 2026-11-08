@@ -23,12 +23,13 @@ const (
 // MSYS2 runtime (Git Bash) does when its job allows breakaway: with CREATE_BREAKAWAY_FROM_JOB.
 func TestMain(m *testing.M) {
 	// Run as `boat list --json` (BOAT_EXE is this binary): list the machine ids in the file named by
-	// FAIRSHARE_TEST_BOAT_LIST, one per line.
+	// FAIRSHARE_TEST_BOAT_LIST, separated by spaces; "id=name" also gives the machine a name.
 	if len(os.Args) > 1 && os.Args[1] == "list" && os.Getenv("FAIRSHARE_TEST_BOAT_LIST") != "" {
 		b, _ := os.ReadFile(os.Getenv("FAIRSHARE_TEST_BOAT_LIST"))
 		ids := []string{}
-		for _, id := range strings.Fields(string(b)) {
-			ids = append(ids, fmt.Sprintf("{\"id\":%q}", id))
+		for _, field := range strings.Fields(string(b)) {
+			id, name, _ := strings.Cut(field, "=")
+			ids = append(ids, fmt.Sprintf("{\"id\":%q,\"name\":%q}", id, name))
 		}
 		fmt.Printf("{\"sandboxes\":[%s]}\n", strings.Join(ids, ","))
 		os.Exit(0)
