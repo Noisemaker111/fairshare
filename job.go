@@ -489,7 +489,7 @@ func descendants(procs map[uint32]procInfo, root uint32) []uint32 {
 func pullIntoJobs(s *jobSet, root uint32, tried map[uint32]bool) (pulled, sided int, outside []uint32, why error) {
 	procs := snapshot()
 	for _, pid := range descendants(procs, root) {
-		if starting(procs[pid].created) {
+		if procs[pid].unstarted {
 			continue // the next sweep takes it (see starting)
 		}
 		if tried[pid] {

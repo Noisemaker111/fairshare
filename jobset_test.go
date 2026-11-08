@@ -14,7 +14,10 @@ import (
 	"github.com/Noisemaker111/fairshare/internal/windows"
 )
 
-const createBreakawayFromJob = 0x01000000
+const (
+	createBreakawayFromJob = 0x01000000
+	createSuspended        = 0x00000004
+)
 
 // The test binary doubles as a program that, told to over stdin, starts a child the way the
 // MSYS2 runtime (Git Bash) does when its job allows breakaway: with CREATE_BREAKAWAY_FROM_JOB.
@@ -122,10 +125,11 @@ func TestSideJobKeepsBreakawayOfTheJobAroundIt(t *testing.T) {
 	}
 }
 
-// A process that just appeared may still be starting: a Store app (the Store PowerShell) fails to
-// start with "Access is denied" if it is put in a job before Windows puts it in its package's job.
-// So exec's sweep (and adopt) leave a new process alone for settleTime, then take it.
-func TestSweepLeavesAStartingProcessUntilItSettles(t *testing.T) {
+// A process Windows is still starting has one thread, held suspended: a Store app (the Store
+// PowerShell) fails to start with "Access is denied" if it is put in a job before Windows puts it
+// in its package's job, which happens in that window. So exec's sweep (and adopt) leave such a
+// process alone however long it stays that way, and take it as soon as its thread runs.
+func TestSweepLeavesAProcessUntilItsThreadRuns(t *testing.T) {
 	job, err := killOnCloseJob()
 	if err != nil {
 		t.Fatal(err)
@@ -138,18 +142,29 @@ func TestSweepLeavesAStartingProcessUntilItSettles(t *testing.T) {
 	defer s.release()
 	child := exec.Command(os.Args[0])
 	child.Env = append(os.Environ(), "FAIRSHARE_TEST_HELPER=spawn-breakaway") // waits on stdin
+	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createSuspended}
 	stdin, _ := child.StdinPipe()
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
-	started := time.Now()
 	defer func() { stdin.Close(); child.Process.Kill(); child.Wait() }()
-	self, tried := uint32(os.Getpid()), map[uint32]bool{}
-	if pulled, sided, _, _ := pullIntoJobs(s, self, tried); pulled+sided != 0 {
-		t.Fatalf("a process %s old was moved into a job while it may still be starting", time.Since(started))
+	pid := uint32(child.Process.Pid)
+	if !snapshot()[pid].unstarted {
+		t.Fatal("a process whose one thread was never let run is not seen as starting")
 	}
-	time.Sleep(time.Until(started.Add(settleTime + 200*time.Millisecond)))
+	self, tried := uint32(os.Getpid()), map[uint32]bool{}
+	time.Sleep(1200 * time.Millisecond) // longer than the clock-based wait this replaced
+	if pulled, sided, _, _ := pullIntoJobs(s, self, tried); pulled+sided != 0 {
+		t.Fatal("a process still being started was moved into a job")
+	}
+	if !setSuspended(pid, ntResumeProcess) {
+		t.Fatal("could not resume the child")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for snapshot()[pid].unstarted && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if pulled, sided, out, why := pullIntoJobs(s, self, tried); pulled+sided != 1 {
-		t.Fatalf("once settled it should join a job: pulled %d, side %d, outside %v, %v", pulled, sided, out, why)
+		t.Fatalf("once its thread runs it should join a job: pulled %d, side %d, outside %v, %v", pulled, sided, out, why)
 	}
 }

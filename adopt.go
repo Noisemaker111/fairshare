@@ -211,7 +211,7 @@ func cmdAdopt(args []string) int {
 		// new processes oldest first, so a parent is placed before its children
 		var fresh []uint32
 		for pid, info := range procs {
-			if !placed[pid] && !leaveNames[info.name] && pid != 0 && pid != self && !starting(info.created) {
+			if !placed[pid] && !leaveNames[info.name] && pid != 0 && pid != self && !info.unstarted {
 				fresh = append(fresh, pid)
 			}
 		}

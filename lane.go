@@ -156,7 +156,7 @@ func startBalance(lanes []*lane) *laneBalance {
 		}
 	}
 	scan(func(e procEntry) bool {
-		b.procs[e.pid] = procInfo{ppid: e.ppid, name: e.name, created: e.created}
+		b.procs[e.pid] = procInfo{ppid: e.ppid, name: e.name, created: e.created, unstarted: e.unstarted}
 		i, ok := group[e.pid]
 		if !ok {
 			return false

@@ -9,7 +9,6 @@ package main
 import (
 	"encoding/binary"
 	"strings"
-	"time"
 	"unsafe"
 
 	"github.com/Noisemaker111/fairshare/internal/windows"
@@ -45,6 +44,7 @@ type procEntry struct {
 	created   uint64
 	cpu       float64
 	name      string
+	unstarted bool // see unstarted
 }
 
 // procInfo is what fairshare keeps about each process between looks.
@@ -52,22 +52,28 @@ type procInfo struct {
 	ppid    uint32
 	name    string
 	created uint64 // start time; with the ID it names one process even after the ID is reused
+	// Windows is still starting it (see unstarted); nothing may put it in a job yet
+	unstarted bool
 }
 
-// starting says Windows may still be starting the process: it appeared less than settleTime ago.
-// adopt and exec leave such a process for their next look. Windows puts a Store app (the Store
-// PowerShell, which Codex runs every hook through) into its package's job while it starts it; a
-// job fairshare gives it first makes that fail, and the program that started it gets "Access is
-// denied" and nothing runs. 2026-11-07, 150 Store pwsh starts each: 0 failed with no adopt
-// watching, 5 under the PC's adopt, 12 under a second, test adopt. Its children are already in
-// whatever job it ends up in, so waiting a moment lets nothing escape.
-func starting(created uint64) bool {
-	const fileTimeUnixEpoch = 116444736000000000 // 100 ns steps from 1601 to 1970
-	now := uint64(time.Now().UnixNano()/100 + fileTimeUnixEpoch)
-	return created != 0 && now < created+uint64(settleTime/100)
+// unstarted says Windows has not finished starting the process: it has no thread yet, or its one
+// thread is still held suspended, as CreateProcess creates it. adopt and exec leave such a process
+// for their next look, and take it as soon as its thread runs.
+//
+// Windows finishes starting a Store app (the Store PowerShell, which Codex runs every command
+// through) in that window. A Store pwsh given two of fairshare's jobs in it (one placer's job, then
+// another placer's side job nested inside it: adopt and an exec sweep both see the new process)
+// fails to start: the program that started it gets "Access is denied" (Codex: "Failed to create
+// unified exec process") and nothing runs. One job alone did not break it. A parent that starts a
+// child suspended to put it in a job of its own also needs this window left alone. Measured
+// 2026-11-08, two sweepers placing every pwsh a test started, 150 starts each: no wait, 4 failed;
+// this rule, 0 failed and 147 governed; the 1 s wait used before, 0 failed but only 1 governed,
+// since most pwsh calls end within a second. The window is 30 to 60 ms (264 ms seen once). Its
+// children start after it, so waiting lets nothing escape.
+func unstarted(threads int, firstState, firstReason uint32) bool {
+	const waiting, suspended = 5, 5 // KTHREAD_STATE Waiting, KWAIT_REASON Suspended
+	return threads == 0 || threads == 1 && firstState == waiting && firstReason == suspended
 }
-
-const settleTime = time.Second
 
 var snapBuf []byte // grows to fit; made on first use, so commands that never list processes (the hook) skip it
 
@@ -76,7 +82,7 @@ var snapBuf []byte // grows to fit; made on first use, so commands that never li
 func snapshot() map[uint32]procInfo {
 	out := map[uint32]procInfo{}
 	scan(func(e procEntry) bool {
-		out[e.pid] = procInfo{ppid: e.ppid, name: e.name, created: e.created}
+		out[e.pid] = procInfo{ppid: e.ppid, name: e.name, created: e.created, unstarted: e.unstarted}
 		return false
 	}, nil)
 	return out
@@ -126,6 +132,11 @@ func scan(onProc func(procEntry) bool, f func(threadInfo)) bool {
 			}
 			e.name = strings.ToLower(windows.UTF16ToString(u))
 		}
+		var state, reason uint32
+		if t := off + procEntryHeader; threads > 0 && t+threadEntrySize <= len(b) {
+			state, reason = binary.LittleEndian.Uint32(b[t+68:]), binary.LittleEndian.Uint32(b[t+72:])
+		}
+		e.unstarted = unstarted(threads, state, reason)
 		if onProc(e) && f != nil {
 			for i := 0; i < threads; i++ {
 				t := off + procEntryHeader + i*threadEntrySize
