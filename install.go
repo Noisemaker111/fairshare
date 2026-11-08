@@ -142,11 +142,16 @@ func ours(h any, command string) bool {
 }
 
 type hookEntry struct {
+	event   string // "" is PreToolUse
 	matcher string
 	timeout int
 }
 
-// register rewrites the PreToolUse groups in a hooks file and returns the index of the first new group.
+// hookEvents are the events install may have registered in, so a reinstall or uninstall clears each.
+var hookEvents = []string{"PreToolUse", "PostToolUseFailure"}
+
+// register rewrites fairshare's groups in a hooks file and returns the first new group and its index
+// among its event's groups.
 // direct writes the hook in exec form (the program and its arguments, which the agent starts
 // itself); otherwise it is one command line the agent runs through its shell.
 func register(path, agent string, entries []hookEntry, uninstall bool, command string, direct bool) (map[string]any, int, error) {
@@ -162,40 +167,45 @@ func register(path, agent string, entries []hookEntry, uninstall bool, command s
 		hooks = map[string]any{}
 		j["hooks"] = hooks
 	}
-	var groups []any
-	existing, _ := hooks["PreToolUse"].([]any)
-	for _, g := range existing {
-		gm, _ := g.(map[string]any)
-		hs, _ := gm["hooks"].([]any)
-		mine := false
-		for _, h := range hs {
-			if ours(h, command) {
-				mine = true
+	groups := map[string][]any{}
+	for _, ev := range hookEvents {
+		existing, _ := hooks[ev].([]any)
+		for _, g := range existing {
+			gm, _ := g.(map[string]any)
+			hs, _ := gm["hooks"].([]any)
+			mine := false
+			for _, h := range hs {
+				if ours(h, command) {
+					mine = true
+				}
 			}
-		}
-		if !mine {
-			groups = append(groups, g)
+			if !mine {
+				groups[ev] = append(groups[ev], g)
+			}
 		}
 	}
 	index := -1
 	var first map[string]any
 	if !uninstall {
 		for i, e := range entries {
+			ev := or(e.event, "PreToolUse")
 			h := map[string]any{"type": "command", "command": command + " hook " + agent, "timeout": e.timeout}
 			if direct {
 				h["command"], h["args"] = command, []any{"hook", agent}
 			}
 			g := map[string]any{"matcher": e.matcher, "hooks": []any{h}}
-			groups = append(groups, g)
+			groups[ev] = append(groups[ev], g)
 			if i == 0 {
-				index, first = len(groups)-1, g
+				index, first = len(groups[ev])-1, g
 			}
 		}
 	}
-	if len(groups) == 0 {
-		delete(hooks, "PreToolUse")
-	} else {
-		hooks["PreToolUse"] = groups
+	for _, ev := range hookEvents {
+		if len(groups[ev]) == 0 {
+			delete(hooks, ev)
+		} else {
+			hooks[ev] = groups[ev]
+		}
 	}
 	return first, index, writeJSONFile(path, j)
 }
@@ -291,9 +301,10 @@ func cmdInstall(args []string) int {
 	// Claude Code, in every config folder it runs from. A Read of a still-running task's output
 	// waits inside the hook, up to 300 s. Exec form: Claude Code starts a command hook through Git
 	// Bash otherwise, and that start (about 90 ms) cost more than the hook itself on every tool call.
+	// A failed PowerShell call gets a note when its error misleads (failure.go).
 	for _, dir := range agentHomes(filepath.Join(home, ".claude"), "CLAUDE_CONFIG_DIR", "claudeAgent") {
 		claude := filepath.Join(dir, "settings.json")
-		if _, _, err := register(claude, "claude", []hookEntry{{"Bash|PowerShell", 10}, {"Read", 330}}, uninstall, command, true); err != nil {
+		if _, _, err := register(claude, "claude", []hookEntry{{"", "Bash|PowerShell", 10}, {"", "Read", 330}, {"PostToolUseFailure", "PowerShell", 10}}, uninstall, command, true); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -334,7 +345,7 @@ func cmdInstall(args []string) int {
 func registerCodex(codexHome, command string, uninstall bool) (string, error) {
 	hooksFile := filepath.Join(codexHome, "hooks.json")
 	configFile := filepath.Join(codexHome, "config.toml")
-	group, index, err := register(hooksFile, "codex", []hookEntry{{"Bash|write_stdin|wait", 10}}, uninstall, command, false)
+	group, index, err := register(hooksFile, "codex", []hookEntry{{"", "Bash|write_stdin|wait", 10}}, uninstall, command, false)
 	if err != nil {
 		return "", err
 	}

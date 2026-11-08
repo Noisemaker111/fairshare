@@ -38,9 +38,10 @@ func match(t *testing.T, s, pattern string) {
 	}
 }
 
-func TestOnlyUnsafeRmIsSentBack(t *testing.T) {
+// Send-backs cost a turn, so only unsafe-rm and hand-made waits (handwait_test.go) are sent back.
+func TestOnlyUnsafeRmAndHandWaitsAreSentBack(t *testing.T) {
 	dir := t.TempDir()
-	for _, c := range []string{"Start-Sleep 30; Get-Content out.log -Tail 5", "until grep -q done log; do sleep 5; done", "find / -maxdepth 6 -name x", "cat nope.ts", `rm -rf "$D"`, `rm -rf "$TEMP/x"`, "rm -rf build dist"} {
+	for _, c := range []string{"Start-Sleep 30; Get-Content out.log -Tail 5", "find / -maxdepth 6 -name x", "cat nope.ts", `rm -rf "$D"`, `rm -rf "$TEMP/x"`, "rm -rf build dist"} {
 		for _, agent := range []string{"claude", "codex", "opencode"} {
 			shell := "pwsh"
 			if agent == "claude" {
@@ -100,7 +101,7 @@ func TestClaudeWaits(t *testing.T) {
 			t.Error("unbounded wait", c, d)
 		}
 	}
-	for _, c := range []string{"until grep -q done log; do sleep 5; done", "for i in 1 2 3; do curl -s x; sleep 5; done", "Wait-Process -Id 42", "gh pr checks 7 --watch"} {
+	for _, c := range []string{"for i in 1 2 3; do curl -s x; sleep 5; done", "Wait-Process -Id 42", "gh pr checks 7 --watch"} {
 		shell := "bash"
 		if strings.HasPrefix(c, "Wait") {
 			shell = "pwsh"

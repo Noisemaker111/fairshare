@@ -53,6 +53,17 @@ Review that file before sharing it.
   Code, Codex and OpenCode. It passes, rewrites, or sends back each call, and runs long tests and
   builds through `exec`, which keeps their output out of the chat, stops them before the agent's
   time limit, and stops a run that has hung.
+- **Sends back hand-made waits.** A foreground Claude command that only polls for another job to
+  finish (a loop that sleeps until a file or log changes, a `node -e` script that rereads a log on a
+  timer, `timeout 590 tail -f`, or `fairshare await` typed by hand) is answered with the tool's own
+  background option and its completion notice instead. Such waits run to their timeout while the
+  job is still going and get run again: about 150 minutes of reruns in the two days to 2026-11-08.
+  Server readiness loops (`curl`), loops over a fixed list, and anything already in the background
+  pass.
+- **Explains a PowerShell call that never started.** Claude's PowerShell tool sometimes fails with
+  only "Access is denied." (11 times in 8 chats on 2026-11-07). The hook, on Claude's
+  `PostToolUseFailure`, adds that nothing ran, and for a CPU-load or process check points to Owl's
+  `answers whats-running`.
 - **Runs at most two heavy jobs at once on the PC.** A command on the heavy list waits for one of
   two heavy-job slots shared by every chat and repo (`FAIRSHARE_HEAVY_SLOTS` changes the count);
   any other command never waits. Without slots, six chats each started a full suite and tests

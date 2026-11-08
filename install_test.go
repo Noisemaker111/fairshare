@@ -104,6 +104,25 @@ func TestInstallReplacesAgentGuardAndIsIdempotent(t *testing.T) {
 	if strings.Contains(h, "agent-guard") {
 		t.Error("codex hooks:", h)
 	}
+	// A failed PowerShell call goes to the hook too (failure.go), once however often install runs.
+	var failure struct {
+		Hooks struct {
+			PostToolUseFailure []struct {
+				Matcher string
+				Hooks   []struct {
+					Command string
+					Args    []string
+				}
+			}
+		}
+	}
+	json.Unmarshal([]byte(s), &failure)
+	if f := failure.Hooks.PostToolUseFailure; len(f) != 1 || f[0].Matcher != "PowerShell" || len(f[0].Hooks) != 1 || f[0].Hooks[0].Command != exe || strings.Join(f[0].Hooks[0].Args, " ") != "hook claude" {
+		t.Error("claude PostToolUseFailure:", s)
+	}
+	if strings.Contains(h, "PostToolUseFailure") {
+		t.Error("Codex has no PostToolUseFailure:", h)
+	}
 	// T3's Claude Hub and Codex Hub get the same hooks; Codex's is trusted in its own config.
 	if got := ourMatchers(hubSettings, read(hubSettings)); got != "Bash|PowerShell,Read" {
 		t.Error("Claude Hub settings:", read(hubSettings))

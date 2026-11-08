@@ -1,7 +1,7 @@
 package main
 
-// `fairshare hook claude|codex|opencode` reads one PreToolUse payload on stdin and answers in that
-// agent's protocol. On any internal error it prints nothing, which lets the call through unchanged.
+// `fairshare hook claude|codex|opencode` reads one PreToolUse payload (or Claude's PostToolUseFailure,
+// failure.go) on stdin and answers in that agent's protocol. On any internal error it prints nothing, which lets the call through unchanged.
 
 import (
 	"encoding/json"
@@ -32,6 +32,7 @@ type hookPayload struct {
 	Cwd       string         `json:"cwd"`
 	Mode      string         `json:"permission_mode"`
 	OpenField string         `json:"command_field"` // opencode: which input field holds the command
+	Error     string         `json:"error"`         // PostToolUseFailure: what the failed call printed
 }
 
 func toCall(agent string, p hookPayload) Call {
@@ -106,11 +107,21 @@ func cmdHook(args []string) int {
 		logEvent("error", map[string]any{"agent": agent, "error": "bad payload: " + clip(err.Error(), 200)})
 		return 0
 	}
-	if p.Event != "" && p.Event != "PreToolUse" {
-		return 0
-	}
 	if p.Input == nil {
 		p.Input = map[string]any{}
+	}
+	if p.Event == "PostToolUseFailure" {
+		if note := failureNote(agent, p); note != "" {
+			b, _ := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": p.Event, "additionalContext": note}})
+			os.Stdout.Write(b)
+			cmd, _ := p.Input["command"].(string)
+			logEvent("failure", map[string]any{"agent": agent, "tool": p.Tool, "session": p.Session, "rules": []string{"pwsh-no-start"},
+				"cmd": clip(cmd, 300), "error": clip(p.Error, 200)})
+		}
+		return 0
+	}
+	if p.Event != "" && p.Event != "PreToolUse" {
+		return 0
 	}
 	// chat_pid ties the call to its chat's lane (adopt names lanes by harness process). Only logged
 	// calls look it up: a Read that waits on nothing logs nothing.
