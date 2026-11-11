@@ -86,6 +86,39 @@ reading(30)
 code, out = launch("k5", "[pc] untold")
 check("without a notify command the refusal says degraded", code == 1 and "degraded: queue_notify is not set" in out, out)
 
+# One line for several machines: a launch that can run on a host is asked about through the
+# queue_place command, held where that says, and never passes a launch waiting for the same machine.
+fs("queue", "drop", "1")
+place = os.path.join(home, "place.py")
+asked = os.path.join(home, "asked.jsonl")
+open(place, "w").write("import sys, json\nq = json.load(sys.stdin)\nopen(r'%s','a').write(json.dumps(q['usable'])+'\\n')\n"
+                       "print(json.dumps({'machine': 'host-b' if 'host-b' in q['usable'] else ''}))\n" % asked)
+json.dump({"queue_notify": [sys.executable, "-I", notify], "queue_place": [sys.executable, "-I", place], "queue_place_seconds": 0.01},
+          open(os.path.join(home, "settings.json"), "w"))
+open(told, "w").close()
+reading(30)
+launch("p1", "[pc] needs this PC")
+code, out = fs("queue", "add", "--key", "h1", "--launcher", "thread-C", "--label", "runs anywhere", "--machines", "pc,host-a,host-b",
+               "--request", "-", stdin=json.dumps({"title": "runs anywhere"}))
+check("a launch that can run on three machines joins the same line, behind the PC's", code == 0 and json.loads(out).get("place") == 2, out)
+code, out = fs("queue", "add", "--key", "h2", "--launcher", "thread-D", "--label", "runs anywhere too", "--machines", "pc,host-a,host-b")
+fs("queue", "move")
+line = {e["key"]: e for e in json.loads(fs("queue", "--json")[1])}
+usable = [json.loads(l) for l in open(asked)] if os.path.exists(asked) else []
+check("it is asked about without the PC, which the launch ahead waits for", usable[:1] == [["host-a", "host-b"]], str(usable))
+check("room is held for it on the host that was picked, past the PC's line", line["h1"]["state"] == "offered" and line["h1"]["machine"] == "host-b"
+      and line["p1"]["state"] == "waiting", str(line))
+notices = [json.loads(l) for l in open(told) if l.strip()]
+check("its launcher is told which machine", [(n["entry"]["launcher"], n["entry"]["machine"]) for n in notices if n["event"] == "offer"][:1] == [("thread-C", "host-b")], str(notices))
+code, out = fs("queue", "claim", "--key", "h1")
+check("sent again, it leaves the line for that machine", code == 0 and json.loads(out).get("machine") == "host-b", out)
+code, out = fs("queue", "claim", "--key", "p1")
+check("a launch still waiting is told its place", code == 1 and json.loads(out).get("state") == "waiting", out)
+code, out = fs("queue", "add", "--key", "p1", "--launcher", "thread-A", "--label", "[pc] needs this PC", "--machines", "pc,host-b")
+line = {e["key"]: e for e in json.loads(fs("queue", "--json")[1])}
+check("a waiting launch sent again with more machines keeps its place and gains them", json.loads(out).get("place") == 1
+      and line["p1"]["machines"] == ["pc", "host-b"], out)
+
 shutil.rmtree(home, ignore_errors=True)
 print("failures:", fails)
 sys.exit(1 if fails else 0)

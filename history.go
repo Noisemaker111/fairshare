@@ -60,7 +60,7 @@ func summarize(lines []historyLineRead, hours float64) Summary {
 		busy += l.Busy
 		capacity += l.Capacity
 		s.Presence[l.Presence]++
-		if l.Busy+l.Waiting > l.Capacity {
+		if l.Capacity > 0 && l.Busy >= fullShare*l.Capacity {
 			full++
 		}
 		if l.Waiting >= 1 {

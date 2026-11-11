@@ -455,6 +455,8 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		return Reading{}, false, nil
 	}
 
+	waiting = waitingWhenFull(waiting, busy, float64(len(idle)-reserved))
+	userWaiting = waitingWhenFull(userWaiting, userBusy, float64(reserved))
 	memTotal, memAvail := memStatus()
 	m.win.add(sample{at: now, seconds: seconds, busy: busy, userBusy: userBusy, waiting: waiting,
 		memAvailGB: memAvail, workCores: workCPU / seconds, programs: programs, others: others}, longWindow)
@@ -467,7 +469,7 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	r.BusyShort, r.WaitingShort, r.UserBusy, r.WorkCores, r.MemAvailGB, progCPU, otherCPU, progSeconds = m.win.means(now, shortWindow)
 	r.ShortSeconds = progSeconds
 	r.BusyLong, r.WaitingLong, _, _, _, _, _, r.LongSeconds = m.win.means(now, longWindow)
-	r.DemandShort, r.DemandLong = r.BusyShort+r.WaitingShort, r.BusyLong+r.WaitingLong
+	r.DemandShort, r.DemandLong = r.BusyShort, r.BusyLong
 	for _, f := range []*float64{&r.BusyShort, &r.BusyLong, &r.WaitingShort, &r.WaitingLong, &r.DemandShort, &r.DemandLong, &r.UserBusy, &r.WorkCores, &r.MemAvailGB, &r.ShortSeconds, &r.LongSeconds} {
 		*f = round2(*f)
 	}
@@ -598,7 +600,7 @@ func runMeter() error {
 			if err := writeReading(r); err != nil {
 				fmt.Fprintln(os.Stderr, "degraded: reading not written:", err)
 			}
-			moveLine(r, s, now)
+			go moveLine(r, s, now)
 			if now.Sub(m.lastHistory) >= time.Minute {
 				m.lastHistory = now
 				appendLine("history.jsonl", historyLine{At: r.At, Capacity: r.Capacity, Busy: r.BusyShort, Waiting: r.WaitingShort,

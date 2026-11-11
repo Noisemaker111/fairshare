@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -26,6 +25,7 @@ const usage = `fairshare: how much room this machine has for agent work, measure
       --reading <file|->           decide on a reading from another machine instead of this one's
       --json
   fairshare queue [--json]         the launches waiting for room, in order; "queue drop <id>" takes one out
+  fairshare queue add|claim ...    for a launch that can run on several machines: keep its place, take its turn
   fairshare reading                this machine's reading as JSON
   fairshare history [--hours N]    what the meter saw: how full, how long work waited, the reserve unused
   fairshare settings               the numbers in use and the file they come from
@@ -200,7 +200,7 @@ func cmdRoom(args []string) int {
 	err = withLock(func() error {
 		q := loadQueue()
 		at, held := position(q, *key)
-		if *key != "" && held != nil && held.State == "offered" {
+		if *key != "" && held != nil && held.State == "offered" && (held.Machine == "" || held.Machine == here) {
 			// Its turn: the room was held for it, so it goes in on what it was offered at.
 			v = decide(r, s, ask, Need{})
 			v.OK, v.CPU.OK, v.Mem.OK, v.Disk.OK = true, true, true, true
@@ -230,16 +230,8 @@ func cmdRoom(args []string) int {
 		if !*wait || *key == "" || *launcher == "" {
 			return nil
 		}
-		e := queued{ID: nextID(q), Key: *key, Launcher: *launcher, Title: *label, Threads: *threads, Count: max(*count, 1), Checkout: *checkout,
-			Need: Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, QueuedAt: now, State: "waiting"}
-		if len(body) > 0 {
-			dir := filepath.Join(homeDir(), "queue")
-			if err := os.MkdirAll(dir, 0o755); err == nil {
-				e.Request = filepath.Join(dir, fmt.Sprintf("%d.json", e.ID))
-				os.WriteFile(e.Request, body, 0o644)
-			}
-		}
-		q = append(q, e)
+		q, _, _ = join(q, queued{Key: *key, Launcher: *launcher, Title: *label, Threads: *threads, Count: max(*count, 1), Checkout: *checkout,
+			Need: Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, QueuedAt: now}, body)
 		if err := saveQueue(q); err != nil {
 			return err
 		}
@@ -306,8 +298,14 @@ func statusText(v Verdict, s Settings) string {
 	if r.ReserveWhy != "" {
 		row("kept because", r.ReserveWhy)
 	}
-	row("last "+span(r.ShortSeconds), fmt.Sprintf("%.1f in use, %.1f waiting for one", r.BusyShort, r.WaitingShort))
-	row("last "+span(r.LongSeconds), fmt.Sprintf("%.1f in use, %.1f waiting for one", r.BusyLong, r.WaitingLong))
+	use := func(busy, waiting float64) string {
+		if waiting >= 1 {
+			return fmt.Sprintf("%.1f in use, and %.0f more threads waited while they were full", busy, waiting)
+		}
+		return fmt.Sprintf("%.1f in use", busy)
+	}
+	row("last "+span(r.ShortSeconds), use(r.BusyShort, r.WaitingShort))
+	row("last "+span(r.LongSeconds), use(r.BusyLong, r.WaitingLong))
 	if r.Reserved > 0 {
 		row("your side", fmt.Sprintf("%.1f of %d in use, %.1f of it your own programs", r.UserBusy, r.Reserved, r.UserCores))
 	}

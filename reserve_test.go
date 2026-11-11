@@ -89,6 +89,7 @@ func TestLinuxReadingUsesTheContainersOwnLimits(t *testing.T) {
 		CgroupMemMax: "17179869184\n", CgroupMemCurrent: "13958643712\n", CgroupMemStat: "anon 100\ninactive_file 1073741824\nactive_file 1073741824\n",
 		CgroupCPUMax: "800000 100000\n",
 		PressureCPU:  "some avg10=40.00 avg60=22.50 avg300=9.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+		Use:          &cpuUse{Short: 8, Long: 6, ShortSeconds: 60, LongSeconds: 300},
 	}
 	r, err := linuxReading(f, 32)
 	if err != nil {

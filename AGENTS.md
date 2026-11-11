@@ -29,10 +29,15 @@ old counts; `fairshare install` puts it back.
 
 ## Who asks it
 
-- `~/.claude/hooks/thread-cap.py` (Claude Code and Codex, before a T3 thread starts) asks
-  `fairshare room --take --queue` for the PC and `boat-host.sh room` for a boat host. Its tests are
-  `~/.claude/hooks/test_thread_cap.py`. A PC launch with no room waits in the line; a boat host
-  launch is only refused, since another host can take it.
+- `~/.claude/hooks/thread-cap.py` (Claude Code and Codex, before a T3 thread starts) decides
+  where a launch runs through `~/.claude/hooks/placement.py`: the PC (`fairshare room`) or any
+  boat host that has the repo (`boat-host.sh --conf <dir> room`), whichever has room, and the
+  line (`fairshare queue add --machines ...`) when none has. `place-on-host.py` moves the launch
+  to the host that was picked. Tests: `test_thread_cap.py`, `test_placement.py`,
+  `test_place_on_host.py` in the same folder.
+- `~/.claude/hooks/fairshare-place.py` is this PC's `queue_place` (the same choice for a launch
+  that waited) and `fairshare-order.py` its `queue_order`: the launches the manager lists in
+  `~/.config/t3-manager/goals.json` "pending" go first, in that list's order.
 - `~/.claude/hooks/fairshare-offer.py` is this PC's `queue_notify`: it puts the notice in the
   manager's ping outbox (`notify-manager.py`), so a busy thread gets it when its turn ends.
 - `~/.agents/skills/boat-host/boat-host.sh up` copies `fairshare-linux` to each host as

@@ -58,10 +58,19 @@ type Settings struct {
 	// launch (one JSON notice on its stdin). QueueHoldMinutes is how long the room stays held
 	// before the next in line is asked; after QueueOffers untaken offers, or QueueMaxHours in the
 	// line, a launch leaves it.
-	QueueNotify      []string `json:"queue_notify,omitempty"`
-	QueueHoldMinutes float64  `json:"queue_hold_minutes"`
-	QueueOffers      int      `json:"queue_offers"`
-	QueueMaxHours    float64  `json:"queue_max_hours"`
+	QueueNotify []string `json:"queue_notify,omitempty"`
+	// QueuePlace is the command the meter runs to pick a machine for a waiting launch that can
+	// run on more than this one: {"entry", "local", "usable"} on its stdin, {"machine": "<name>"}
+	// or {"machine": ""} on its stdout. It is asked at most every QueuePlaceSeconds.
+	QueuePlace []string `json:"queue_place,omitempty"`
+	// QueueOrder is the command that says which waiting launches go first: the line as JSON on
+	// its stdin, the ids that go to the front, in order, as a JSON list on its stdout. Launches
+	// it does not name keep their order behind those. Asked at most every QueuePlaceSeconds.
+	QueueOrder        []string `json:"queue_order,omitempty"`
+	QueuePlaceSeconds float64  `json:"queue_place_seconds"`
+	QueueHoldMinutes  float64  `json:"queue_hold_minutes"`
+	QueueOffers       int      `json:"queue_offers"`
+	QueueMaxHours     float64  `json:"queue_max_hours"`
 	// DiskPath is the folder whose disk is measured. Unset: the home folder's disk.
 	DiskPath string `json:"disk_path,omitempty"`
 }
@@ -86,9 +95,10 @@ func defaultSettings() Settings {
 		ReserveHeadroomFullScreen: 2,
 		ReserveWindowSeconds:      180,
 
-		QueueHoldMinutes: 10,
-		QueueOffers:      6,
-		QueueMaxHours:    24,
+		QueueHoldMinutes:  10,
+		QueuePlaceSeconds: 30,
+		QueueOffers:       6,
+		QueueMaxHours:     24,
 	}
 }
 
@@ -152,7 +162,7 @@ func (s Settings) check() error {
 		v    float64
 	}{{"away_minutes", s.AwayMinutes}, {"thread_cores", s.ThreadCores}, {"thread_mem_gb", s.ThreadMemGB}, {"settle_minutes", s.SettleMinutes}, {"sample_seconds", s.SampleSeconds},
 		{"reserve_headroom", s.ReserveHeadroom}, {"reserve_headroom_full_screen", s.ReserveHeadroomFullScreen}, {"reserve_window_seconds", s.ReserveWindowSeconds},
-		{"queue_hold_minutes", s.QueueHoldMinutes}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)}} {
+		{"queue_hold_minutes", s.QueueHoldMinutes}, {"queue_place_seconds", s.QueuePlaceSeconds}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)}} {
 		if c.v <= 0 {
 			return fmt.Errorf("%s is %v; it must be more than 0", c.name, c.v)
 		}
