@@ -389,6 +389,9 @@ func (w work) roomArgs(m member, take bool, seen *Sizing) []string {
 	if w.Urgent {
 		args = append(args, "--urgent")
 	}
+	if slices.Contains(w.Needs, "desktop") {
+		args = append(args, "--desktop")
+	}
 	for i, v := range []float64{w.Explicit.Cores, w.Explicit.MemGB, w.Explicit.DiskGB} {
 		if v > 0 {
 			args = append(args, []string{"--cores", "--mem-gb", "--disk-gb"}[i], strconv.FormatFloat(v, 'f', -1, 64))
@@ -412,6 +415,14 @@ func open(m member, w work) (bool, string) {
 		return false, "not one of the machines this work may use"
 	}
 	for _, need := range w.Needs {
+		if need == "desktop" {
+			// Whether the desktop is free now is the machine's own answer (room.go); a machine with
+			// no screen has none to drive.
+			if m.OS != "windows" {
+				return false, "has no desktop"
+			}
+			continue
+		}
 		if need != m.OS && !slices.Contains(m.Can, need) {
 			return false, "cannot do " + need
 		}
@@ -819,6 +830,11 @@ func placeWords(pl placement, answers []reply, picked int) string {
 		case "room":
 			others = append(others, fmt.Sprintf("%s would have %.1f", a.Name, a.Free))
 		case "full":
+			if v := a.verdict; v != nil && v.Desk != nil && !v.Desk.OK {
+				// Its processors may have room: what it lacks is a desktop nobody is at.
+				others = append(others, fmt.Sprintf("%s cannot start it now (it drives the desktop, and %s)", a.Name, v.Desk.Why))
+				continue
+			}
 			others = append(others, fmt.Sprintf("%s is full (%.1f of %.1f in use)", a.Name, a.Used, a.Limit))
 		case "asleep":
 			if strings.Contains(a.Why, "plan-hours") {
@@ -925,7 +941,7 @@ func workFlags(fs *flag.FlagSet) func() work {
 	memGB := fs.Float64("mem-gb", 0, "the caller's guess at its memory, used until work like it is measured")
 	diskGB := fs.Float64("disk-gb", 0, "count it as this much disk")
 	threads := fs.String("threads", "", "agent threads open on each machine now: pc=7,host=2")
-	needs := fs.String("needs", "", "what the machine must be or can do: windows,gpu,deploy")
+	needs := fs.String("needs", "", "what the machine must be or can do: windows,gpu,deploy; desktop for work that drives the screen")
 	among := fs.String("among", "", "the only machines it may go to")
 	run := fs.String("run", "", "the work is a run of this command, for a caller that places it and runs it itself")
 	return func() work {
@@ -962,6 +978,8 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
       --cores X --mem-gb X           a guess, used only until work like this is measured: each machine
                                      counts the work as what it, or another machine of the pool, measured
       --needs windows,deploy         only a machine that is or can do each of these
+      --needs desktop                the work opens windows on the screen, moves the pointer or captures it:
+                                     it starts only while nobody is at the PC, one piece at a time
       --among a,b                    only these machines
       --run "<command>"              the work is a run of this command, not a thread (pool run says so itself)
       --take                         count the work on the machine picked until it is seen running
@@ -1320,7 +1338,7 @@ func poolRun(args []string) int {
 	}
 	m := pl.member
 	fmt.Fprintf(os.Stderr, "fairshare: %s (placed in %.1f s)\n", pl.Reason, pl.Seconds)
-	mark := &runMark{Repo: w.Repo, What: w.What, Label: w.Label}
+	mark := &runMark{Repo: w.Repo, What: w.What, Label: w.Label, Desktop: slices.Contains(w.Needs, "desktop")}
 	for _, a := range pl.Machines {
 		if a.Name == m.Name && a.verdict != nil {
 			mark.Need = Need{Cores: a.verdict.CPU.Need, MemGB: a.verdict.Mem.Need}

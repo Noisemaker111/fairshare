@@ -23,6 +23,19 @@ type grant struct {
 	Kind  string `json:"kind,omitempty"`
 	Repo  string `json:"repo,omitempty"`
 	Count int    `json:"count,omitempty"`
+	// Desktop says the work drives the desktop.
+	Desktop bool `json:"desktop,omitempty"`
+}
+
+// desktopPending says whether work that drives the desktop was let in during the settle time and
+// is not yet seen running: the desktop is taken from the moment it is let in.
+func desktopPending(now time.Time, settle time.Duration, work []LiveWork) bool {
+	for _, g := range unmet(readGrants(now, settle), work) {
+		if g.Desktop {
+			return true
+		}
+	}
+	return false
 }
 
 // unmet is the part of the grants whose work is not running yet. Each piece of open work that

@@ -71,6 +71,8 @@ type Verdict struct {
 	// Measured what this machine itself measured for exactly this work, for the pool to pass on.
 	Sized    Sizing  `json:"sized"`
 	Measured *Sizing `json:"measured,omitempty"`
+	// Desk is the desktop's side of the answer, for work that drives it; nil for all other work.
+	Desk *Desk `json:"desktop,omitempty"`
 	// Open is the work already open here as the rule counted it: how many pieces, what they use
 	// over the short window, what they are expected to use, and their swing taken together.
 	Open    OpenWork `json:"open"`
@@ -85,6 +87,42 @@ type OpenWork struct {
 	Swing  float64 `json:"swing"`
 	// Rest is the processors in use that belong to no piece of work.
 	Rest float64 `json:"rest"`
+}
+
+// Desk says whether work that drives the desktop may start, and why not.
+type Desk struct {
+	OK  bool   `json:"ok"`
+	Why string `json:"why,omitempty"`
+}
+
+// desktopFree is the rule for work that drives the desktop: work that opens windows on it, moves
+// the pointer or captures the screen. It starts only on a machine that has a desktop, while
+// nobody is at it, and one piece at a time; taken says such work was let in a moment ago.
+//
+// Why: on 2026-11-11 Jon's PC lagged about five seconds at a time while he worked. It was not
+// short of processors: with 8 kept for him and 4 of them idle, Windows' window manager stalled 25
+// times in 100 seconds, 0.2 to 2 seconds each (a frame is 17 to 40 ms), and the window he was in
+// sat blocked waiting on it. Three gates of Owl's port were driving fixture windows, dragging and
+// capturing the screen on his desktop at once; in the 50 seconds they paused the frames were
+// normal at the same load. Processors, memory and disk all said there was room.
+func desktopFree(r Reading, taken bool) Desk {
+	switch r.Presence.State {
+	case "none", "":
+		return Desk{Why: "this machine has no desktop"}
+	case "active":
+		return Desk{Why: "someone is at the PC"}
+	case "full-screen":
+		return Desk{Why: cmpOr(r.Presence.App, "something") + " is full screen"}
+	}
+	for _, w := range r.Work {
+		if w.Desktop {
+			return Desk{Why: "the " + workWords(w) + " has it"}
+		}
+	}
+	if taken {
+		return Desk{Why: "work let in a moment ago is about to drive it"}
+	}
+	return Desk{OK: true}
 }
 
 // Ask is what the caller wants room for.
@@ -105,6 +143,9 @@ type Ask struct {
 	Learned []level
 	// Urgent judges the launch against the work that would not step aside for it.
 	Urgent bool
+	// Desktop says the work drives the desktop (desktopFree), and DesktopTaken that such work was
+	// let in a moment ago and is not yet seen running.
+	Desktop, DesktopTaken bool
 }
 
 func cpuTarget(r Reading, s Settings) float64 {
@@ -198,6 +239,11 @@ func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 	}
 
 	v.OK = v.CPU.OK && v.Mem.OK && v.Disk.OK
+	if a.Desktop {
+		d := desktopFree(r, a.DesktopTaken)
+		v.Desk = &d
+		v.OK = v.OK && d.OK
+	}
 	v.Reason = reason(v, s, a)
 	return v
 }
@@ -275,6 +321,9 @@ func reason(v Verdict, s Settings, a Ask) string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "%s has no room for %s.", r.Machine, what)
+	if v.Desk != nil && !v.Desk.OK {
+		fmt.Fprintf(&b, " It drives the desktop, and %s: work that opens windows on the screen, moves the pointer or captures it starts only while nobody is at the PC, one piece at a time.", v.Desk.Why)
+	}
 	if !v.CPU.OK {
 		if v.Urgent {
 			fmt.Fprintf(&b, " Even with other agent work held back, work that does not step aside uses %.1f of the %.0f processors agent work may use", v.CPU.Used, r.Capacity)

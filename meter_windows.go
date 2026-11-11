@@ -5,7 +5,9 @@ package main
 // The meter: one small process that looks at the PC every few seconds and keeps the reading every
 // other command answers from. Windows keeps no load average, so something has to. A look is two
 // system calls (every processor's times, every process and thread) plus memory, disk and what is
-// in the foreground; it changes nothing on the PC and touches no other process.
+// in the foreground; it changes nothing on the PC. Of another process it only reads: the folder
+// it works in, and its processor time, through a handle kept from the first look that sees it so
+// that what it used in its last seconds is still there to read once it has ended.
 //
 // It never runs per command. fairshare's first version put a hook in front of every agent command,
 // which cost 130-160 ms a call and broke commands, and was removed on 2026-11-08. This one is asked
@@ -20,8 +22,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -32,6 +36,7 @@ var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 	user32   = syscall.NewLazyDLL("user32.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
+	dwmapi   = syscall.NewLazyDLL("dwmapi.dll")
 
 	procNtQuerySystemInformation     = ntdll.NewProc("NtQuerySystemInformation")
 	procGlobalMemoryStatusEx         = kernel32.NewProc("GlobalMemoryStatusEx")
@@ -52,6 +57,7 @@ var (
 	procGetWindowThreadProcessId     = user32.NewProc("GetWindowThreadProcessId")
 	procIsZoomed                     = user32.NewProc("IsZoomed")
 	procSHQueryUserNotificationState = shell32.NewProc("SHQueryUserNotificationState")
+	procDwmFlush                     = dwmapi.NewProc("DwmFlush")
 )
 
 const (
@@ -72,22 +78,24 @@ const (
 )
 
 // processorTimes returns each logical processor's idle and total (kernel plus user) time, in
-// 100 ns units since the PC started. Windows counts idle time inside kernel time.
-func processorTimes() (idle, total []uint64, err error) {
+// 100 ns units since the PC started, and the part of the total spent in interrupts, which is
+// no process's. Windows counts idle and interrupt time inside kernel time.
+func processorTimes() (idle, total, irq []uint64, err error) {
 	buf := make([]byte, processorEntrySize*256)
 	var got uint32
 	st, _, _ := procNtQuerySystemInformation.Call(systemProcessorPerformanceInformation, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&got)))
 	if st != 0 {
-		return nil, nil, fmt.Errorf("NtQuerySystemInformation(processor times) status %#x", st)
+		return nil, nil, nil, fmt.Errorf("NtQuerySystemInformation(processor times) status %#x", st)
 	}
 	n := int(got) / processorEntrySize
-	idle, total = make([]uint64, n), make([]uint64, n)
+	idle, total, irq = make([]uint64, n), make([]uint64, n), make([]uint64, n)
 	for i := range n {
 		o := i * processorEntrySize
 		idle[i] = binary.LittleEndian.Uint64(buf[o:])
 		total[i] = binary.LittleEndian.Uint64(buf[o+8:]) + binary.LittleEndian.Uint64(buf[o+16:])
+		irq[i] = binary.LittleEndian.Uint64(buf[o+24:]) + binary.LittleEndian.Uint64(buf[o+32:]) // DPC and interrupt time
 	}
-	return idle, total, nil
+	return idle, total, irq, nil
 }
 
 // procLook is one process in a look.
@@ -364,6 +372,14 @@ func owlAgents(s Settings, args ...string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %v: %s", what, err, strings.TrimSpace(string(out[:min(len(out), 300)])))
 		}
+		// Owl answers a setting it does not have with an error in its JSON and exit 0 (2026-11-11:
+		// yield_before, on an Owl from before it had one), so the exit code alone says nothing.
+		var said struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(jsonPart(out), &said) == nil && said.Error != "" {
+			return fmt.Errorf("%s: Owl refused: %s", what, said.Error)
+		}
 		return nil
 	case <-time.After(15 * time.Second):
 		if cmd.Process != nil {
@@ -410,8 +426,126 @@ func processDir(pid uint32) string {
 	return syscall.UTF16ToString(u)
 }
 
+// frameWatch times Windows' window manager from the meter's own process: DwmFlush returns once
+// the next frame of the desktop is drawn, which takes about one refresh of the screen, and as
+// long as the window manager is stalled when it is. It asks nothing of any other program.
+//
+// Why: processors, memory and disk can all have room while the desktop cannot be used (room.go,
+// desktopFree). This is the measurement that shows it, in the reading and the history.
+type frameWatch struct {
+	mu    sync.Mutex
+	ms    []float64 // the frames timed since the last take
+	began time.Time // when the frame now awaited was asked for; zero between frames
+}
+
+// watch times one frame five times a second, for ever. It ends at once on a Windows with no
+// window manager to ask.
+func (f *frameWatch) watch() {
+	if procDwmFlush.Find() != nil {
+		return
+	}
+	for {
+		f.mu.Lock()
+		f.began = time.Now()
+		f.mu.Unlock()
+		hr, _, _ := procDwmFlush.Call()
+		f.mu.Lock()
+		// A failure (nothing is being drawn: the screen is locked) is not a frame.
+		if took := time.Since(f.began); hr == 0 && len(f.ms) < 4096 {
+			f.ms = append(f.ms, took.Seconds()*1000)
+		}
+		f.began = time.Time{}
+		f.mu.Unlock()
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// take is the frames timed since the last take: how long one usually took (the median), the
+// slowest, and how many. A frame still awaited counts as taking what it has taken so far, so a
+// stall that outlasts a look is in that look.
+func (f *frameWatch) take(now time.Time) (usual, worst float64, n int) {
+	f.mu.Lock()
+	ms := f.ms
+	f.ms = nil
+	if !f.began.IsZero() {
+		worst = now.Sub(f.began).Seconds() * 1000
+	}
+	f.mu.Unlock()
+	if len(ms) == 0 {
+		return 0, 0, 0
+	}
+	sort.Float64s(ms)
+	return ms[len(ms)/2], max(worst, ms[len(ms)-1]), len(ms)
+}
+
+// heldProc is what the meter keeps of a process from the first look that sees it: the process as
+// the latest look saw it, and a handle that can do nothing but read its times. When the process
+// ends, what it used after the last look that saw it is read from the handle.
+type heldProc struct {
+	h    syscall.Handle // 0 when Windows refused one
+	seen procLook
+}
+
+// endedProc is a process that ended since the look before.
+type endedProc struct {
+	seen procLook
+	used float64 // processor-seconds after the last look that saw it
+	at   time.Time
+}
+
+func ftime(f syscall.Filetime) uint64 { return uint64(f.HighDateTime)<<32 | uint64(f.LowDateTime) }
+
+// keep notes a process this look saw, and the first time opens the handle its last seconds will
+// be read from. The handle is for the process the look saw and no other: process ids are reused.
+func (m *meter) keep(p procLook) {
+	k := procKey{p.pid, p.created}
+	if e, ok := m.held[k]; ok {
+		e.seen = p
+		return
+	}
+	if m.held == nil {
+		m.held = map[procKey]*heldProc{}
+	}
+	e := &heldProc{seen: p}
+	const queryLimited = 0x1000
+	if h, err := syscall.OpenProcess(queryLimited, false, p.pid); err == nil {
+		var began, end, kernel, user syscall.Filetime
+		if syscall.GetProcessTimes(h, &began, &end, &kernel, &user) == nil && ftime(began) == p.created {
+			e.h = h
+		} else {
+			syscall.CloseHandle(h)
+		}
+	}
+	m.held[k] = e
+}
+
+// ended is the processes that ended since the look before, each with what it used after that
+// look, and lets go of them. alive is the processes of this look.
+func (m *meter) ended(alive map[procKey]float64) []endedProc {
+	var out []endedProc
+	for k, e := range m.held {
+		if _, ok := alive[k]; ok {
+			continue
+		}
+		if e.h != 0 {
+			var began, end, kernel, user syscall.Filetime
+			if syscall.GetProcessTimes(e.h, &began, &end, &kernel, &user) == nil {
+				if used := float64(ftime(kernel)+ftime(user))/1e7 - e.seen.cpu; used > 0 {
+					out = append(out, endedProc{seen: e.seen, used: used, at: filetime(ftime(end))})
+				}
+			}
+			syscall.CloseHandle(e.h)
+		}
+		delete(m.held, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].seen.pid < out[j].seen.pid })
+	return out
+}
+
 type meter struct {
 	prevIdle, prevTotal []uint64
+	prevIrq             []uint64
+	held                map[procKey]*heldProc
 	prevCPU             map[procKey]float64
 	prevAt              time.Time
 	win                 window
@@ -424,11 +558,14 @@ type meter struct {
 	session             uint32
 	perCore             int
 	lastState           string
-	// The urgent hold Owl was last told, and when.
+	// The urgent hold Owl was last told, and when; yieldErr is what went wrong telling it.
 	yieldSince, yieldAt time.Time
+	yieldErr            string
 	// Which work uses what (work.go), and what was learned from it (learn.go).
 	track tracker
 	known learned
+	// How long the window manager takes to draw a frame.
+	frames frameWatch
 }
 
 // filetime turns a Windows time (100 ns units since 1601) into a time.
@@ -447,7 +584,7 @@ func whereWindows(pid uint32, _ uint64) (dir, thread string) { return processDir
 // look measures the PC once and returns the reading as of now. The first look only sets the
 // counters every later look is measured against, and returns ok false.
 func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
-	idle, total, err := processorTimes()
+	idle, total, irq, err := processorTimes()
 	if err != nil {
 		return Reading{}, false, err
 	}
@@ -468,35 +605,89 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	}
 	reserved = max(0, min(reserved, len(idle)-1))
 
+	// The processors in use since the look before: on the agent processors, on the reserved ones,
+	// and in all as the processor-seconds some process used (interrupts are nobody's).
+	first := m.prevAt.IsZero() || len(m.prevIdle) != len(idle)
+	seconds := now.Sub(m.prevAt).Seconds()
+	var busy, userBusy, spent float64
+	if !first && seconds > 0 {
+		for i := range idle {
+			dt := float64(total[i] - m.prevTotal[i])
+			if dt <= 0 {
+				continue
+			}
+			rest := float64(idle[i] - m.prevIdle[i])
+			used := max(0, min(1, 1-rest/dt))
+			if i < reserved {
+				userBusy += used
+			} else {
+				busy += used
+			}
+			spent += max(0, dt-rest-float64(irq[i]-m.prevIrq[i])) / 1e7
+		}
+	}
+
+	// Every process of this look with what it used since the look before, then the processes that
+	// ended since then with what they used after it.
 	cpuNow := make(map[procKey]float64, len(procs))
 	names := make(map[uint32]string, len(procs))
-	programs, others := map[string]float64{}, map[string]float64{}
-	mem, otherMem := map[string]float64{}, map[string]float64{}
-	count, otherCount := map[string]int{}, map[string]int{}
-	var waiting, workMem, workCPU, idleCPU, userCPU, userWaiting, gameCPU float64
-	game := ""
-	nodes := make([]procNode, 0, len(procs))
+	seen := make([]procLook, 0, len(procs)+16)
+	nodes := make([]procNode, 0, len(procs)+16)
+	node := func(p procLook, used float64) procNode {
+		return procNode{pid: p.pid, parent: p.parent, created: p.created, name: p.name, cores: used, memGB: p.private / (1 << 30),
+			work: p.base <= belowNormalBase && p.pid != 4, started: filetime(p.created), total: p.cpu}
+	}
 	for _, p := range procs {
 		if p.pid == 0 { // the idle process: its threads are "ready" whenever a processor is busy
 			continue
 		}
 		names[p.pid] = p.name
-		waiting += float64(p.ready)
 		key := procKey{p.pid, p.created}
 		cpuNow[key] = p.cpu
 		// What it used since the last look; a process started since then used all it has.
-		var used float64
-		if before, seen := m.prevCPU[key]; seen && p.cpu > before {
-			used = p.cpu - before
-		} else if !seen && m.prevCPU != nil {
-			used = p.cpu
+		n := node(p, 0)
+		if before, known := m.prevCPU[key]; known && p.cpu > before {
+			n.cores = p.cpu - before
+		} else if !known && m.prevCPU != nil {
+			n.cores, n.fresh = p.cpu, true
 		}
-		nodes = append(nodes, procNode{pid: p.pid, parent: p.parent, created: p.created, name: p.name, cores: used, memGB: p.private / (1 << 30),
-			work: p.base <= belowNormalBase && p.pid != 4, started: filetime(p.created), total: p.cpu})
+		seen, nodes = append(seen, p), append(nodes, n)
+	}
+	for _, e := range m.ended(cpuNow) {
+		n := node(e.seen, e.used)
+		n.gone, n.ended, n.memGB = true, e.at, 0
+		seen, nodes = append(seen, e.seen), append(nodes, n)
+	}
+	for _, p := range procs {
+		if p.pid != 0 {
+			m.keep(p)
+		}
+	}
+	// What no process accounts for was used by processes no look saw (work.go, creditUnseen).
+	if !first && seconds > 0 {
+		var counted float64
+		for _, n := range nodes {
+			counted += n.cores
+		}
+		creditUnseen(nodes, spent-counted)
+	}
+
+	programs, others := map[string]float64{}, map[string]float64{}
+	mem, otherMem := map[string]float64{}, map[string]float64{}
+	count, otherCount := map[string]int{}, map[string]int{}
+	var waiting, workMem, workCPU, idleCPU, userCPU, userWaiting, gameCPU, otherCPU float64
+	game := ""
+	for i, n := range nodes {
+		p, used, live := seen[i], n.cores, !n.gone
+		if live {
+			waiting += float64(p.ready)
+		}
 		if p.base > belowNormalBase || p.pid == 4 {
 			if p.session == m.session && p.session != 0 {
 				userCPU += used
-				userWaiting += float64(p.ready)
+				if live {
+					userWaiting += float64(p.ready)
+				}
 				if m.rv.isGame(p.name, s) {
 					gameCPU += used
 					if game == "" {
@@ -505,13 +696,18 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 				}
 			}
 			others[p.name] += used
-			otherMem[p.name] += p.private / (1 << 30)
-			otherCount[p.name]++
+			otherCPU += used
+			if live {
+				otherMem[p.name] += p.private / (1 << 30)
+				otherCount[p.name]++
+			}
 			continue
 		}
-		workMem += p.private
-		mem[p.name] += p.private / (1 << 30)
-		count[p.name]++
+		if live {
+			workMem += p.private
+			mem[p.name] += p.private / (1 << 30)
+			count[p.name]++
+		}
 		programs[p.name] += used
 		workCPU += used
 		if p.base <= idleBase {
@@ -519,25 +715,7 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		}
 	}
 
-	first := m.prevAt.IsZero() || len(m.prevIdle) != len(idle)
-	seconds := now.Sub(m.prevAt).Seconds()
-	var busy, userBusy float64
-	if !first && seconds > 0 {
-		for i := range idle {
-			dt := float64(total[i] - m.prevTotal[i])
-			if dt <= 0 {
-				continue
-			}
-			used := 1 - float64(idle[i]-m.prevIdle[i])/dt
-			used = max(0, min(1, used))
-			if i < reserved {
-				userBusy += used
-			} else {
-				busy += used
-			}
-		}
-	}
-	m.prevIdle, m.prevTotal, m.prevCPU = idle, total, cpuNow
+	m.prevIdle, m.prevTotal, m.prevIrq, m.prevCPU = idle, total, irq, cpuNow
 	m.prevAt = now
 	if first || seconds <= 0 {
 		return Reading{}, false, nil
@@ -546,18 +724,35 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	waiting = waitingWhenFull(waiting, busy, float64(len(idle)-reserved))
 	userWaiting = waitingWhenFull(userWaiting, userBusy, float64(reserved))
 	memTotal, memAvail := memStatus()
-	holding, hold := m.urgent(s, now, nodes)
+	work := m.measure(s, now, seconds, nodes, names)
+	holding, hold := m.urgent(s, now, work)
 	firm := firmCores(busy, workCPU/seconds, idleCPU/seconds, holding)
+	idleFor := idleInput()
+	presence := Presence{State: "active", IdleMinutes: round2(idleFor.Minutes())}
+	if app := fullScreenApp(names); app != "" {
+		presence.State, presence.App = "full-screen", app
+	} else if idleFor.Minutes() >= s.AwayMinutes {
+		presence.State = "away"
+	}
+	// Frames are timed for the person looking at them: with nobody there the screen may be off,
+	// and a frame nobody draws is not a slow one.
+	frameMs, frameWorst, frames := m.frames.take(now)
+	if presence.State == "away" {
+		frameMs, frameWorst, frames = 0, 0, 0
+	}
 	m.win.add(sample{at: now, seconds: seconds, busy: busy, userBusy: userBusy, waiting: waiting, firm: firm, idleCores: idleCPU / seconds,
-		memAvailGB: memAvail, workCores: workCPU / seconds, programs: programs, others: others}, longWindow)
+		memAvailGB: memAvail, workCores: workCPU / seconds, programs: programs, others: others, otherCores: otherCPU / seconds, hasOthers: true,
+		frameMs: frameMs, frameWorst: frameWorst, frames: frames}, longWindow)
 
 	r := Reading{OS: "windows", At: now.UTC(), Processors: len(idle), Reserved: reserved, Capacity: float64(len(idle) - reserved),
 		MemTotalGB: round2(memTotal), WorkMemGB: round2(workMem / (1 << 30))}
-	r.Work = m.measure(s, now, seconds, nodes, names)
+	r.Work = work
+	r.OtherCores = round2(m.win.othersMean(now, shortWindow))
+	r.FrameMs, r.FrameWorstMs = m.win.frameTimes(now, shortWindow)
 	r.Machine, _ = os.Hostname()
-	var progCPU, otherCPU map[string]float64
+	var progCPU, otherProgCPU map[string]float64
 	var progSeconds float64
-	r.BusyShort, r.WaitingShort, r.UserBusy, r.WorkCores, r.MemAvailGB, progCPU, otherCPU, progSeconds = m.win.means(now, shortWindow)
+	r.BusyShort, r.WaitingShort, r.UserBusy, r.WorkCores, r.MemAvailGB, progCPU, otherProgCPU, progSeconds = m.win.means(now, shortWindow)
 	r.ShortSeconds = progSeconds
 	r.BusyLong, r.WaitingLong, _, _, _, _, _, r.LongSeconds = m.win.means(now, longWindow)
 	r.DemandShort, r.DemandLong = r.BusyShort, r.BusyLong
@@ -565,12 +760,15 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	r.FirmLong, _ = m.win.firmMeans(now, longWindow)
 	if holding {
 		r.Urgent = &hold
+		if m.yieldErr != "" {
+			r.Notes = append(r.Notes, "the urgent hold is recorded but Owl is not holding anything back for it: "+m.yieldErr)
+		}
 	}
 	for _, f := range []*float64{&r.BusyShort, &r.BusyLong, &r.WaitingShort, &r.WaitingLong, &r.DemandShort, &r.DemandLong, &r.FirmShort, &r.FirmLong, &r.IdleCores, &r.UserBusy, &r.WorkCores, &r.MemAvailGB, &r.ShortSeconds, &r.LongSeconds} {
 		*f = round2(*f)
 	}
 	r.Programs = topPrograms(progCPU, progSeconds, mem, count, 8)
-	r.Others = topPrograms(otherCPU, progSeconds, otherMem, otherCount, 5)
+	r.Others = topPrograms(otherProgCPU, progSeconds, otherMem, otherCount, 5)
 
 	r.DiskPath = s.DiskPath
 	if r.DiskPath == "" {
@@ -582,13 +780,7 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		r.DiskFreeGB = round2(free)
 	}
 
-	idleFor := idleInput()
-	r.Presence = Presence{State: "active", IdleMinutes: round2(idleFor.Minutes())}
-	if app := fullScreenApp(names); app != "" {
-		r.Presence.State, r.Presence.App = "full-screen", app
-	} else if idleFor.Minutes() >= s.AwayMinutes {
-		r.Presence.State = "away"
-	}
+	r.Presence = presence
 	m.lastState = r.Presence.State
 
 	r.UserCores = round2(userCPU / seconds)
@@ -600,6 +792,8 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	// Defender read every file a build writes, 4.4 processors at their peak on 2026-11-10) run at
 	// normal priority on any processor, so they need none kept; counting them made the reserve 8
 	// again with the user's programs at 0.3. The user's threads waiting is the check on this.
+	// Measured again on 2026-11-11 under a full agent load: 2 kept or 8 kept, windows answered in
+	// 0.1 ms and the window manager's frames differed by 0 to 15 ms, with no stall either way.
 	if app := strings.ToLower(r.Presence.App); game == "" && r.Presence.State == "full-screen" && app != "" && !notGame(app, s) {
 		game, gameCPU = app, others[app]
 	}
@@ -627,7 +821,8 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 
 // urgent keeps the urgent hold: it ends the hold once it no longer stands (urgentHold.live), and
 // while it stands tells Owl again every minute, so Owl's three minutes never run out under it.
-func (m *meter) urgent(s Settings, now time.Time, nodes []procNode) (bool, urgentHold) {
+// work is the work open in this look.
+func (m *meter) urgent(s Settings, now time.Time, work []LiveWork) (bool, urgentHold) {
 	hold, ok := loadUrgent()
 	if !ok {
 		if !m.yieldSince.IsZero() {
@@ -636,26 +831,19 @@ func (m *meter) urgent(s Settings, now time.Time, nodes []procNode) (bool, urgen
 		}
 		return false, hold
 	}
-	since := uint64(hold.Since.UnixNano()/100) + 116444736000000000
-	newer := false
-	for _, n := range nodes {
-		for _, r := range s.Runners {
-			if isRunner(n.name, []string{r}) && n.created >= since {
-				newer = true
-			}
-		}
-	}
-	if !hold.live(now, newer, s) {
+	if !hold.live(now, hold.runs(work), s) {
 		os.Remove(urgentFile())
 		if err := endYield(s); err != nil {
 			fmt.Fprintln(os.Stderr, "degraded:", err)
 		}
-		appendLine("decisions.jsonl", map[string]any{"at": now.UTC(), "event": "urgent ended", "since": hold.Since, "labels": hold.Labels}, 8<<20)
+		appendLine("decisions.jsonl", map[string]any{"at": now.UTC(), "event": "urgent ended", "since": hold.Since, "labels": hold.Labels, "repos": hold.Repos}, 8<<20)
 		m.yieldSince = time.Time{}
 		return false, hold
 	}
 	if !hold.Since.Equal(m.yieldSince) || now.Sub(m.yieldAt) >= time.Minute {
+		m.yieldErr = ""
 		if err := tellYield(s, hold.Since); err != nil {
+			m.yieldErr = err.Error()
 			fmt.Fprintln(os.Stderr, "degraded:", err)
 		}
 		m.yieldSince, m.yieldAt = hold.Since, now
@@ -678,19 +866,24 @@ func (m *meter) measure(s Settings, now time.Time, seconds float64, nodes []proc
 
 // historyLine is what the meter keeps of each minute.
 type historyLine struct {
-	At         time.Time `json:"at"`
-	Capacity   float64   `json:"capacity"`
-	Busy       float64   `json:"busy"`
-	Firm       float64   `json:"firm"`
-	Waiting    float64   `json:"waiting"`
-	UserBusy   float64   `json:"user_busy"`
-	Reserved   int       `json:"reserved"`
-	WorkCores  float64   `json:"work_cores"`
-	MemAvailGB float64   `json:"mem_avail_gb"`
-	DiskFreeGB float64   `json:"disk_free_gb"`
-	Presence   string    `json:"presence"`
-	App        string    `json:"app,omitempty"`
-	Programs   []Program `json:"programs,omitempty"`
+	At        time.Time `json:"at"`
+	Capacity  float64   `json:"capacity"`
+	Busy      float64   `json:"busy"`
+	Firm      float64   `json:"firm"`
+	Waiting   float64   `json:"waiting"`
+	UserBusy  float64   `json:"user_busy"`
+	Reserved  int       `json:"reserved"`
+	WorkCores float64   `json:"work_cores"`
+	Others    float64   `json:"others"`
+	// FrameMs is how long the window manager usually took to draw a frame in the minute, and
+	// FrameWorstMs the slowest; both 0 when nobody was at the PC.
+	FrameMs      float64   `json:"frame_ms,omitempty"`
+	FrameWorstMs float64   `json:"frame_worst_ms,omitempty"`
+	MemAvailGB   float64   `json:"mem_avail_gb"`
+	DiskFreeGB   float64   `json:"disk_free_gb"`
+	Presence     string    `json:"presence"`
+	App          string    `json:"app,omitempty"`
+	Programs     []Program `json:"programs,omitempty"`
 }
 
 func meterMutexName() string {
@@ -728,6 +921,7 @@ func runMeter() error {
 	}
 	os.Remove(stopFile())
 	var m meter
+	go m.frames.watch()
 	if lines, err := readHistory(time.Now().Add(-longWindow)); err == nil {
 		m.win.seed(lines, time.Now(), longWindow)
 	}
@@ -755,7 +949,7 @@ func runMeter() error {
 			if now.Sub(m.lastHistory) >= time.Minute {
 				m.lastHistory = now
 				appendLine("history.jsonl", historyLine{At: r.At, Capacity: r.Capacity, Busy: r.BusyShort, Firm: r.FirmShort, Waiting: r.WaitingShort,
-					UserBusy: r.UserBusy, Reserved: r.Reserved, WorkCores: r.WorkCores, MemAvailGB: r.MemAvailGB, DiskFreeGB: r.DiskFreeGB,
+					UserBusy: r.UserBusy, Reserved: r.Reserved, WorkCores: r.WorkCores, Others: r.OtherCores, FrameMs: r.FrameMs, FrameWorstMs: r.FrameWorstMs, MemAvailGB: r.MemAvailGB, DiskFreeGB: r.DiskFreeGB,
 					Presence: r.Presence.State, App: r.Presence.App, Programs: r.Programs[:min(len(r.Programs), 5)]}, 16<<20)
 			}
 		}

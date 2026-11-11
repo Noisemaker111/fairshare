@@ -96,7 +96,7 @@ func TestWhatMakesALaunchUrgent(t *testing.T) {
 func TestAnUrgentHoldStandsWhileItsSessionsRunAndNoLonger(t *testing.T) {
 	s := defaultSettings()
 	t0 := time.Date(2026, 11, 11, 10, 40, 0, 0, time.UTC)
-	h := urgentHold{}.join(t0, "AppForGutters production fix", false)
+	h := urgentHold{}.join(t0, "AppForGutters production fix", "AppForGutters", false)
 	if !h.live(t0.Add(10*time.Minute), false, s) {
 		t.Fatal("a hold ended inside its least minutes")
 	}
@@ -110,12 +110,51 @@ func TestAnUrgentHoldStandsWhileItsSessionsRunAndNoLonger(t *testing.T) {
 		t.Fatal("a hold outlived urgent_most_minutes")
 	}
 	// A second urgent launch under a standing hold keeps its start, so the first never yields.
-	later := h.join(t0.Add(30*time.Minute), "second fix", true)
-	if !later.Since.Equal(t0) || !later.Last.Equal(t0.Add(30*time.Minute)) || len(later.Labels) != 2 {
+	later := h.join(t0.Add(30*time.Minute), "second fix", "owl-go", true)
+	if !later.Since.Equal(t0) || !later.Last.Equal(t0.Add(30*time.Minute)) || len(later.Labels) != 2 || len(later.Repos) != 2 {
 		t.Fatalf("joined hold = %+v", later)
 	}
-	if fresh := h.join(t0.Add(3*time.Hour), "next day", false); !fresh.Since.Equal(t0.Add(3*time.Hour)) || len(fresh.Labels) != 1 {
+	if fresh := h.join(t0.Add(3*time.Hour), "next day", "", false); !fresh.Since.Equal(t0.Add(3*time.Hour)) || len(fresh.Labels) != 1 || len(fresh.Repos) != 0 {
 		t.Fatalf("a hold after one ended = %+v", fresh)
+	}
+}
+
+// 2026-11-11: the hold for an AppForGutters deploy let in at 12:22 still stood at 13:05, kept
+// standing by a fairshare thread that started at 13:03 and had nothing to do with it.
+func TestAHoldStandsOnlyWhileTheWorkItWasForRuns(t *testing.T) {
+	s := defaultSettings()
+	t0 := time.Date(2026, 11, 11, 17, 22, 0, 0, time.UTC)
+	h := urgentHold{}.join(t0, "One certain production deploy", "AppForGutters", false)
+	deploy := LiveWork{Kind: "thread", Repo: "appforgutters", Since: t0.Add(10 * time.Second)}
+	other := LiveWork{Kind: "thread", Repo: "fairshare", Since: t0.Add(41 * time.Minute)}
+	older := LiveWork{Kind: "thread", Repo: "appforgutters", Since: t0.Add(-2 * time.Hour)}
+	gate := LiveWork{Kind: "run", Repo: "appforgutters", What: "bun run gate", Since: t0.Add(30 * time.Minute)}
+	for _, c := range []struct {
+		name string
+		work []LiveWork
+		want bool
+	}{
+		{"the thread it was for is running", []LiveWork{older, deploy, other}, true},
+		{"a run of its repo started since is running", []LiveWork{gate}, true},
+		{"only somebody else's thread started since", []LiveWork{other}, false},
+		{"only a thread of its repo from before it", []LiveWork{older}, false},
+		{"nothing is open", nil, false},
+	} {
+		if got := h.runs(c.work); got != c.want {
+			t.Errorf("%s: its work runs = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// 43 minutes on, with the deploy's thread gone and the fairshare thread still open: over.
+	if h.live(t0.Add(43*time.Minute), h.runs([]LiveWork{other}), s) {
+		t.Fatal("the hold stood on somebody else's thread")
+	}
+	if !h.live(t0.Add(43*time.Minute), h.runs([]LiveWork{deploy, other}), s) {
+		t.Fatal("the hold ended while the deploy's thread ran")
+	}
+	// A launch that named no repo has no work to tell from anyone's: its least minutes only.
+	bare := urgentHold{}.join(t0, "hotfix", "", false)
+	if bare.runs([]LiveWork{deploy, other}) || bare.live(t0.Add(25*time.Minute), bare.runs([]LiveWork{deploy}), s) {
+		t.Fatal("a hold with no repo stood on other work")
 	}
 }
 

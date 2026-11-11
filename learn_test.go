@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,10 +130,20 @@ func TestARunIsNamedByItsCommand(t *testing.T) {
 		"node scripts/land.mjs --pr #":  {"node", "scripts/land.mjs", "--pr", "12345"},
 		"git checkout # && go test ./.": {"sh", "-c", "git checkout 147faa3c9d && go test ./."},
 		"python3 -c print(1)":           {"python3", "-c", "print(1)"},
+		// On Windows a command starts with the whole path of its program, which says nothing.
+		`python c:\work\demo\burn.py 2 12`: {`C:\Users\Jk101\AppData\Local\Programs\Python\Python312\python.exe`, `C:\work\demo\burn.py`, "2", "12"},
+		"go test ./...":                    {"/usr/local/go/bin/go", "test", "./..."},
 	} {
 		if got := runName(argv); got != want {
 			t.Errorf("%q is named %q, want %q", argv, got, want)
 		}
+	}
+	// Two long commands that differ only near the end are two commands, each named the same way
+	// every time, and neither name is longer than a hundred characters.
+	long := `C:\Users\Jk101\AppData\Local\Temp\fs-learn-abcdefgh\a-folder-with-a-long-name\and-another-one-inside-it\burn.py`
+	short, tall := runName([]string{"python.exe", long, "2", "12"}), runName([]string{"python.exe", long, "2", "3"})
+	if short == tall || len(short) > 100 || len(tall) > 100 || short != runName([]string{"python.exe", long, "2", "12"}) || !strings.HasPrefix(short, `python c:\users\jk101\appdata\local\temp\`) {
+		t.Errorf("two long commands are named %q and %q", short, tall)
 	}
 }
 

@@ -71,10 +71,28 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   since an urgent hold began. When it is let in, Owl's keeper holds every agent session older than it
   at idle priority (its `yield_before`, told for three minutes and again every minute), so Windows
   runs the urgent session first and the older work on what it leaves. Nothing is paused or ended.
-  The hold stands for 20 minutes, then while a session started since is running, and never past
-  two hours. The processors kept for the user stay theirs: urgent work is held off them like all
-  agent work. Why: on 2026-11-11 a production fix for AppForGutters was refused room because two Owl
-  Rust ports' gates used 17 of the 18 agent processors, and had to go to a host that cannot deploy.
+  The hold stands for 20 minutes, then while work of the repo the urgent launch was for, begun
+  since, is still running, and never past two hours. The processors kept for the user stay theirs:
+  urgent work is held off them like all agent work. Why: on 2026-11-11 a production fix for
+  AppForGutters was refused room because two Owl Rust ports' gates used 17 of the 18 agent
+  processors, and had to go to a host that cannot deploy.
+  A hold exists only once Owl has taken it. An Owl without the setting answers with an error and
+  exit 0; fairshare reads the answer, says `degraded:` and records no hold. Why: the same
+  afternoon the PC's Owl did not have `yield_before` yet (owl-go #1161 was still open), a hold
+  for a deploy stood 45 minutes with nothing held, and any agent session started since kept it
+  standing, whoever's it was.
+- **Keeps the desktop for the person at it.** Work that opens windows on the screen, moves the
+  pointer or captures it says so (`fairshare pool run --needs desktop -- <command>`, or
+  `fairshare room --desktop`) and starts only while nobody is at the PC, one piece at a time; a
+  run waits for that with `--wait <minutes>`. Work already started is never stopped. The meter
+  also times Windows' window manager (how long a frame of the desktop takes to draw: `screen` in
+  `fairshare status`, `frame_ms` and `frame_worst_ms` in the reading and the history), so a
+  desktop that stalls shows as that and not as a guess about processors. Why: on 2026-11-11 the
+  PC lagged about five seconds at a time while Jon worked, with processors, memory and disk all
+  showing room. Three gates of Owl's port were driving fixture windows, dragging and capturing
+  the screen on his desktop at once; the window manager stalled 25 times in 100 seconds, 0.2 to
+  2 seconds each, and the window he was in sat blocked waiting on it. Keeping 8 processors for
+  him instead of 2 changed nothing; stopping those tests ended it within the minute.
 - **Keeps processors for the user only while a game runs.** Jon's rule (2026-11-11): two
   processors kept (`reserve_min_processors`) so the desktop never fails, unless a game runs. A game
   is a program full screen (not a browser or player named in `not_games`), a program named in
@@ -135,6 +153,7 @@ fairshare room --checkout --take --label "<what>" [--repo <name>] [--urgent]
                                  the answer a launch asks for: exit 0 room, 1 no room, 2 cannot tell
 fairshare room --kind run --what "<command>" --repo <name>
                                  the same for a run of a command (the pool asks this)
+fairshare room ... --desktop     the work drives the desktop: room only while nobody is at the PC, one at a time
 fairshare room ... --queue --key <k> --launcher <thread> --request <file|->
                                  no room: wait in the line; the launcher is told when its turn comes
 fairshare queue                  the line, in order; `queue drop <id>` takes a launch out
@@ -287,9 +306,21 @@ read as before.
   one call that lists every process, counted only when 90% or more of the processors they may
   use were busy over that look. Shown, and kept in the history; not part of the room decision.
 - Agent work: processes at below-normal priority or lower, which is how Owl holds every agent
-  process. The user's programs: everything else in the user's own session. A process that starts
-  and ends between two looks is in the processor totals but in no program's line, and in no
-  piece of work's minutes.
+  process. The user's programs: everything else in the user's own session.
+- What a process used: its processor time at each look against the look before. The meter keeps
+  a handle on every process from the first look that sees it (one that can only read its
+  times), so when the process ends, what it used after the last look and the moment it ended
+  are still read: a run is measured to its last second. A process that begins and ends between
+  two looks is seen by none; its time is in the processor totals, and is shared among the agent
+  processes that were seen beginning or ending in that look, equally, so it lands on the work
+  that starts short processes. That share is the one estimate in the meter. Measured on
+  2026-11-11 with a look every 5 s: 68 to 73% of the processor time in use was in processes
+  alive at a look, 3 to 4% was the last seconds of processes that had just ended, and 23 to 29%
+  was never seen (compiler jobs, test binaries, git); looking four times a second still missed
+  13% and cost 4% of a processor.
+- The desktop: how long Windows' window manager takes to draw a frame (`DwmFlush`, called from
+  the meter's own process five times a second), while someone is at the PC. About one refresh
+  of the screen when the desktop is well; seconds when something stalls it.
 - Which work: a process belongs to the nearest runner or run above it by its parents, and keeps
   that after they are gone. An agent process with nothing above it is placed by the folder it
   runs in (read from its process parameters, once).
@@ -327,6 +358,21 @@ read as before.
 
 The meter and its numbers agree with Windows' own per-processor counters to the percent. One look
 costs two system calls; the hook that asks takes 20 ms on the PC and 0.7 s for a boat host.
+
+## Measured on Jon's PC (2026-11-11): what made it lag, and what did not
+
+| | a frame of the desktop | the window he was in |
+|---|---|---|
+| No agent load | 22 ms, slowest 44 | answers in 0.1 ms |
+| Agent work filling the PC (12 burners, 3 full Go rebuilds), 8 processors kept | 24 to 34 ms, slowest 64 to 172 | 0.1 ms, slowest 1 to 7 |
+| The same load, 2 kept | 37 to 46 ms, slowest 72 to 94 | 0.1 ms, slowest 4 to 15 |
+| Owl's port gates driving the desktop from three worktrees, 8 kept, 4 of them idle | 25 stalls of 0.2 to 2.0 s in 100 s | blocked on the window manager 0.4 to 2.5 s at a time, 82 times in 7 minutes |
+
+| a two-process, 12-second run, PC 17 to 21 of 22 processors busy | what its processes say they used | what the meter learned |
+|---|---|---|
+| look every 5 s, before | 23.5 processor-seconds | 17.1 (27% low, and 10 s of its 13) |
+| look every 5 s, now | 22.1 and 23.9 | 24.6 and 26.8 |
+| look every 1 s, now | 23.4 | 25.0 |
 
 ## Develop
 

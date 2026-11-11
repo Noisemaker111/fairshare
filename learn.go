@@ -23,6 +23,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"os"
 	"path/filepath"
@@ -97,20 +98,35 @@ func learnKey(kind, repo, what string) string {
 var shaLike = regexp.MustCompile(`\b([0-9a-f]{7,40}|[0-9]{5,})\b`)
 
 // runName is what a command is called for learning: its words as typed, without the shell in
-// front of them and without the numbers and commit ids that change from run to run.
+// front of them, without the folder its program is installed in, and without the numbers and
+// commit ids that change from run to run. A name too long to keep whole keeps its start and a
+// mark of the rest, so two long commands that differ only near the end are still two commands.
+//
+// Why: on Windows a command starts with its program's whole path. The first hundred characters
+// of `C:\Users\...\python.exe C:\Users\...\Temp\...\burn.py 2 12` held no word of what was run,
+// so every python command of a repo was one command (2026-11-11).
 func runName(argv []string) string {
+	program := func(path string) string {
+		return strings.TrimSuffix(strings.ToLower(filepath.Base(strings.ReplaceAll(path, `\`, "/"))), ".exe")
+	}
+	script := false
 	if len(argv) >= 3 {
-		switch strings.TrimSuffix(strings.ToLower(filepath.Base(strings.ReplaceAll(argv[0], `\`, "/"))), ".exe") {
+		switch program(argv[0]) {
 		case "bash", "sh", "zsh", "dash":
 			if strings.HasPrefix(argv[1], "-") && strings.HasSuffix(argv[1], "c") {
-				argv = argv[2:]
+				argv, script = argv[2:], true
 			}
 		}
+	}
+	if !script && len(argv) > 0 && !strings.ContainsAny(argv[0], " \t") {
+		argv = append([]string{program(argv[0])}, argv[1:]...)
 	}
 	text := strings.Join(strings.Fields(strings.ToLower(strings.Join(argv, " "))), " ")
 	text = shaLike.ReplaceAllString(text, "#")
 	if len(text) > 100 {
-		text = text[:100]
+		h := fnv.New32a()
+		h.Write([]byte(text))
+		text = fmt.Sprintf("%s~%08x", text[:91], h.Sum32())
 	}
 	return text
 }

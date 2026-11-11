@@ -1,7 +1,10 @@
 # What work uses, learned, end to end: the built fairshare with its real meter in a private home,
 # real processes that burn real processors, a real run through the pool, and a thread whose job
 # detaches from it the way a land does. Nothing is written by hand: every number the checks read
-# was measured by the meter.
+# was measured by the meter, and is held against what the burning processes themselves say they
+# used, so the checks mean the same on a PC that is full as on one that is idle (2026-11-11: on a
+# PC with 20 of its 22 processors busy a two-process burner really got 1.28, and a check that
+# wanted "about 2" failed a meter that was right).
 # Usage: python -I learn-e2e.py <fairshare program>      (Linux and Windows; about a minute)
 # To see it fail: LEARN_E2E_BREAK=1 keeps the meter from starting, and the checks on what was
 # measured fail.
@@ -14,7 +17,9 @@ os.makedirs(home)
 py = sys.executable
 fails = 0
 windows = os.name == "nt"
-env = dict(os.environ, FAIRSHARE_HOME=home, FAIRSHARE_RESERVE="measure")
+truth = os.path.join(root, "truth")
+os.makedirs(truth)
+env = dict(os.environ, FAIRSHARE_HOME=home, FAIRSHARE_RESERVE="measure", LEARN_E2E_TRUTH=truth)
 for name in ("FAIRSHARE_READING", "FAIRSHARE_METER", "T3CODE_THREAD_ID"):
     env.pop(name, None)
 if os.environ.get("LEARN_E2E_BREAK"):
@@ -23,14 +28,31 @@ if os.environ.get("LEARN_E2E_BREAK"):
 # for an agent runner.
 json.dump({"sample_seconds": 1, "runners": ["fakeagent"]}, open(os.path.join(home, "settings.json"), "w"))
 
-# burn.py <processes> <seconds>: that many processes, each using one processor for that long.
+# burn.py <processes> <seconds>: that many processes, each using one processor for that long and
+# then writing down the processor-seconds it itself used.
 burn = os.path.join(root, "burn.py")
 open(burn, "w").write(
-    "import subprocess, sys, time\n"
-    "n, secs = int(sys.argv[1]), float(sys.argv[2])\n"
-    "one = 'import time\\nend = time.time() + %r\\nwhile time.time() < end: pass' % secs\n"
-    "kids = [subprocess.Popen([sys.executable, '-c', one]) for _ in range(n)]\n"
-    "[k.wait() for k in kids]\n")
+    "import os, subprocess, sys, time\n"
+    "if sys.argv[1] == 'one':\n"
+    "    end = time.time() + float(sys.argv[2])\n"
+    "    while time.time() < end: pass\n"
+    "    open(os.path.join(os.environ['LEARN_E2E_TRUTH'], '%d-%d' % (os.getpid(), time.time() * 1000)), 'w').write(str(time.process_time()))\n"
+    "else:\n"
+    "    kids = [subprocess.Popen([sys.executable, __file__, 'one', sys.argv[2]]) for _ in range(int(sys.argv[1]))]\n"
+    "    [k.wait() for k in kids]\n")
+
+
+def burned():
+    """The processor-seconds the burners that have ended say they used, each counted once."""
+    total = 0.0
+    for name in os.listdir(truth):
+        path = os.path.join(truth, name)
+        try:
+            total += float(open(path).read())
+            os.remove(path)
+        except (OSError, ValueError):
+            pass
+    return total
 repo = os.path.join(root, "work", "demo")
 tree = os.path.join(root, ".t3", "worktrees", "demo", "feature-x")
 os.makedirs(repo)
@@ -100,13 +122,17 @@ try:
 
     # A run nobody has measured: it starts at the floor, and is measured while it runs.
     going = subprocess.Popen([exe, "pool", "run", "--repo", "demo", "--wait", "3", "--", py, burn, "2", "12"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    seen = until(lambda: [w for w in status().get("reading", {}).get("work", []) if w["kind"] == "run" and w["now"] >= 1.2], 10)
-    check("a run is seen running as itself: two burning processes read as about 2 processors", seen and seen[0]["repo"] == "demo" and seen[0]["processes"] >= 3, status().get("reading", {}).get("work"))
+    # On a full machine the run waits for room before it starts (--wait 3), so this waits as long.
+    seen = until(lambda: [w for w in status().get("reading", {}).get("work", []) if w["kind"] == "run" and w.get("repo") == "demo" and w["now"] >= 0.6] or going.poll() is not None, 200)
+    seen = seen if isinstance(seen, list) else []
+    check("a run is seen running as itself: its own processes, and the processors they burn", seen and seen[0]["repo"] == "demo" and seen[0]["processes"] >= 3, status().get("reading", {}).get("work"))
     said = going.communicate()[1]
     check("the first run of a command counts as the settings' floor, since nothing like it was measured", going.returncode == 0 and "counts as 1.0 processors" in said, said)
     got = until(lambda: row("run", "burn.py 2 12"))
-    check("when it ends, what it used is what was learned for that command: about 2 processors for about 12 seconds",
-          got and 1.3 <= got["cores"] <= 2.6 and 9 <= got["seconds"] <= 17 and got["works"] >= 1, got or learned())
+    used = burned()
+    counted = got["cores"] * got["minutes"] * 60 if got else 0
+    check("when it ends, what was learned for that command is what its processes say they used (%.1f processor-seconds; the meter counted %.1f) over the 12 seconds it ran" % (used, counted),
+          got and used > 4 and 0.85 * used <= counted <= 1.3 * used + 1 and 11.5 <= got["seconds"] <= 20 and got["works"] >= 1, got or learned())
 
     # The same command again counts as what it was measured using.
     done = subprocess.run([exe, "pool", "run", "--repo", "demo", "--wait", "3", "--", py, burn, "2", "3"], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
@@ -114,9 +140,16 @@ try:
     # Asked, not run: the answer says what the command counts as whether or not this machine has room now.
     code, out, err = fs("pool", "place", "--json", "--repo", "demo", "--cores", "7", "--run", " ".join([py, burn, "2", "12"]))
     me = (json.loads(out).get("machines") or [{}])[0] if out.startswith("{") else {}
-    check("the measured command counts as itself the second time, far nearer its 2 than the 7 its caller guessed with --cores",
-          "burn.py 2 12` in demo here" in me.get("from", "") and 1.3 <= me.get("counted", 0) <= 4.6, out + err)
+    check("the measured command counts as itself the second time, nearer what it was measured using than the 7 its caller guessed with --cores",
+          got and "burn.py 2 12` in demo here" in me.get("from", "") and 0.8 * got["cores"] <= me.get("counted", 0) < (got["cores"] + 7) / 2, out + err)
     check("and a run that ended leaves nothing counted: no mark, no grant", until(lambda: os.listdir(os.path.join(home, "marks")) == [] and status()["cpu"]["pending"] == 0), status().get("cpu"))
+
+    # The rule for work that drives the desktop, asked of this machine as it is now.
+    code, out, err = fs("room", "--kind", "run", "--desktop", "--json")
+    v = json.loads(out) if out.startswith("{") else {}
+    state = v.get("reading", {}).get("presence", {}).get("state")
+    check("work that drives the desktop is let in only while nobody is at the machine's screen (now: %s)" % state,
+          state and v.get("desktop", {}).get("ok") == (state == "away") and (v["desktop"]["ok"] or "It drives the desktop" in v["reason"]), out + err)
 
     if not windows:
         # A thread whose work detaches from it, the way a land does: the runner starts two jobs

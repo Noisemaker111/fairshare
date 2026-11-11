@@ -22,6 +22,7 @@ type historyLineRead struct {
 	Waiting    float64   `json:"waiting"`
 	UserBusy   float64   `json:"user_busy"`
 	Reserved   int       `json:"reserved"`
+	Others     *float64  `json:"others,omitempty"`
 	MemAvailGB float64   `json:"mem_avail_gb"`
 	DiskFreeGB float64   `json:"disk_free_gb"`
 	Presence   string    `json:"presence"`
