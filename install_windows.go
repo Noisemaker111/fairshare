@@ -111,6 +111,26 @@ func copyFile(from, to string) error {
 	return out.Close()
 }
 
+// shims makes `fairshare` a command in every shell: a two-line starter in each of the user's own
+// bin folders that already exists (they are on PATH in Git Bash, cmd and PowerShell), pointing at
+// the installed program, so there is still one copy to update.
+func shims(exe string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	for _, dir := range []string{filepath.Join(home, "bin"), filepath.Join(home, ".local", "bin")} {
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			continue
+		}
+		sh := "#!/bin/sh\nexec \"" + filepath.ToSlash(exe) + "\" \"$@\"\n"
+		cmd := "@\"" + exe + "\" %*\r\n"
+		if os.WriteFile(filepath.Join(dir, "fairshare"), []byte(sh), 0o755) != nil || os.WriteFile(filepath.Join(dir, "fairshare.cmd"), []byte(cmd), 0o644) != nil {
+			fmt.Fprintln(os.Stderr, "degraded: could not write the fairshare starter in", dir)
+		}
+	}
+}
+
 // install puts this program in fairshare's home, registers the task and starts the meter; with
 // uninstall it stops the meter and removes the task, leaving the settings and history.
 func install(uninstall bool) error {
@@ -145,6 +165,7 @@ func install(uninstall bool) error {
 			}
 		}
 	}
+	shims(exe)
 	f, err := os.CreateTemp("", "fairshare-task-*.xml")
 	if err != nil {
 		return err

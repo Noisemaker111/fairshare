@@ -54,6 +54,14 @@ type Settings struct {
 	ReserveWindowSeconds      float64 `json:"reserve_window_seconds"`
 	// OwlPath is Owl's program, which applies the reserve. Unset: its usual place.
 	OwlPath string `json:"owl_path,omitempty"`
+	// QueueNotify is the command the meter runs to tell a thread that room is held for its
+	// launch (one JSON notice on its stdin). QueueHoldMinutes is how long the room stays held
+	// before the next in line is asked; after QueueOffers untaken offers, or QueueMaxHours in the
+	// line, a launch leaves it.
+	QueueNotify      []string `json:"queue_notify,omitempty"`
+	QueueHoldMinutes float64  `json:"queue_hold_minutes"`
+	QueueOffers      int      `json:"queue_offers"`
+	QueueMaxHours    float64  `json:"queue_max_hours"`
 	// DiskPath is the folder whose disk is measured. Unset: the home folder's disk.
 	DiskPath string `json:"disk_path,omitempty"`
 }
@@ -77,6 +85,10 @@ func defaultSettings() Settings {
 		ReserveHeadroom:           1.5,
 		ReserveHeadroomFullScreen: 2,
 		ReserveWindowSeconds:      180,
+
+		QueueHoldMinutes: 10,
+		QueueOffers:      6,
+		QueueMaxHours:    24,
 	}
 }
 
@@ -139,7 +151,8 @@ func (s Settings) check() error {
 		name string
 		v    float64
 	}{{"away_minutes", s.AwayMinutes}, {"thread_cores", s.ThreadCores}, {"thread_mem_gb", s.ThreadMemGB}, {"settle_minutes", s.SettleMinutes}, {"sample_seconds", s.SampleSeconds},
-		{"reserve_headroom", s.ReserveHeadroom}, {"reserve_headroom_full_screen", s.ReserveHeadroomFullScreen}, {"reserve_window_seconds", s.ReserveWindowSeconds}} {
+		{"reserve_headroom", s.ReserveHeadroom}, {"reserve_headroom_full_screen", s.ReserveHeadroomFullScreen}, {"reserve_window_seconds", s.ReserveWindowSeconds},
+		{"queue_hold_minutes", s.QueueHoldMinutes}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)}} {
 		if c.v <= 0 {
 			return fmt.Errorf("%s is %v; it must be more than 0", c.name, c.v)
 		}

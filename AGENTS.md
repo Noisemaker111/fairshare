@@ -18,6 +18,10 @@ reserve out and never tells Owl. A test never runs `install`, and never runs a m
 `FAIRSHARE_HOME` pointed at a temp folder: the meter for a home is one per home, and the real
 home's meter is the one every launch asks.
 
+The line is checked end to end by `python -I scripts/queue-e2e.py fairshare.exe`: the built
+program in a private home, with real files, the real lock and a real notify command, on readings
+written by hand so "full" and "room" are certain whatever the PC is doing.
+
 To see it live: `fairshare status`, then the launch hook the way T3 runs it,
 `echo '<a t3_thread_launch payload>' | python -I ~/.claude/hooks/thread-cap.py`. To see it fail:
 `fairshare install --uninstall`, wait 20 s, and the same hook says `degraded:` and judges by its
@@ -26,8 +30,11 @@ old counts; `fairshare install` puts it back.
 ## Who asks it
 
 - `~/.claude/hooks/thread-cap.py` (Claude Code and Codex, before a T3 thread starts) asks
-  `fairshare room --take` for the PC and `boat-host.sh room` for a boat host. Its tests are
-  `~/.claude/hooks/test_thread_cap.py`.
+  `fairshare room --take --queue` for the PC and `boat-host.sh room` for a boat host. Its tests are
+  `~/.claude/hooks/test_thread_cap.py`. A PC launch with no room waits in the line; a boat host
+  launch is only refused, since another host can take it.
+- `~/.claude/hooks/fairshare-offer.py` is this PC's `queue_notify`: it puts the notice in the
+  manager's ping outbox (`notify-manager.py`), so a busy thread gets it when its turn ends.
 - `~/.agents/skills/boat-host/boat-host.sh up` copies `fairshare-linux` to each host as
   `~/.agents-pc/fairshare`.
 - Owl applies the reserve: the meter runs `owl agents set reserve_processors <n> --for 3m
@@ -39,6 +46,8 @@ old counts; `fairshare install` puts it back.
   and broke commands; a launch is the only moment fairshare is asked.
 - fairshare reads and decides. It never sets a priority, puts a process in a job, suspends or
   ends anything. Owl's keeper does the holding; fairshare only tells it the reserve.
+- fairshare never starts a thread. The line holds a launch's place and its room; the thread that
+  asked sends the identical launch again, so every launch still passes every launch hook.
 - No count of threads in the rule or the settings. A limit is a share of what a machine has, so
   one settings file is right on every machine.
 - The room rule (`room.go`) and the reserve rule (`reserve.go`) are pure functions of a reading

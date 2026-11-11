@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
@@ -67,6 +68,8 @@ func currentReading(s Settings) (Reading, error) {
 	}
 	return r, nil
 }
+
+func hideWindow(*exec.Cmd) {}
 
 func runMeter() error {
 	return errors.New("Linux needs no meter: the kernel keeps the averages, and `fairshare reading` reads them")

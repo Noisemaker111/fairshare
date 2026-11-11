@@ -34,6 +34,16 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   The least is one physical core and the most is half the machine. Owl holds agent work off the
   reserved processors; fairshare tells it the number for three minutes at a time and says it again
   every minute, so if the meter ever stops, Owl puts its own number back.
+- **Keeps the line.** A launch that finds no room is not lost. With `--queue` it waits in
+  fairshare's line with its whole request, in the order it came. After every look the meter checks
+  the front of the line; when the machine has room for it, that room is held for 10 minutes and the
+  thread that asked is told, and the same launch sent again goes straight in. The line is strict:
+  the first launch that does not fit stops it, and a new arrival passes it only when there is room
+  for everyone waiting too. An offer nobody takes goes to the back, and leaves after six. fairshare
+  does not start the thread itself: a launch passes through hooks that place it and pick its model,
+  and the command line that starts threads cannot say everything a launch can (an existing
+  worktree, a model's effort, who launched it), so the thread that asked sends the identical
+  request.
 - **Says why.** A refusal names the numbers: processors in use, threads waiting, the limit and
   what set it, and the busiest programs. Every answer goes to `decisions.jsonl`.
 
@@ -50,7 +60,9 @@ go build -o fairshare.exe . && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o
 .\fairshare.exe install
 ```
 
-`install` copies both programs to `%LOCALAPPDATA%\fairshare\bin` and registers the scheduled task
+`install` copies both programs to `%LOCALAPPDATA%\fairshare\bin`, puts a `fairshare` starter in
+`~/bin` and `~/.local/bin` when they exist (so it is a command in Git Bash, cmd and PowerShell),
+and registers the scheduled task
 `fairshare-meter`, which starts the meter with no window, within a minute of logon, and again
 within a minute if it ever ends. No admin rights. `fairshare install --uninstall` stops the meter
 and removes the task. On Linux there is nothing to install: copy `fairshare-linux` anywhere.
@@ -61,6 +73,9 @@ and removes the task. On Linux there is nothing to install: copy `fairshare-linu
 fairshare status                 what the machine has, what work is taking, and whether a thread fits
 fairshare room --threads 7 --checkout --take --label "<what>"
                                  the answer a launch asks for: exit 0 room, 1 no room, 2 cannot tell
+fairshare room ... --queue --key <k> --launcher <thread> --request <file|->
+                                 no room: wait in the line; the launcher is told when its turn comes
+fairshare queue                  the line, in order; `queue drop <id>` takes a launch out
 fairshare room --reading <file>  the same rule on a reading from another machine
 fairshare reading                this machine's reading as JSON
 fairshare history --hours 24     how full it ran, how long work waited, the reserve unused
@@ -91,6 +106,9 @@ read on every call. None of them is a count of threads.
 | `reserve_window_seconds` | 180 | how far back "used" looks |
 | `reserved_processors` | unset | set it to pin the reserve and switch the measuring off |
 | `sample_seconds` | 5 | how often the meter looks |
+| `queue_notify` | unset | the command that tells a thread its launch has room (one JSON notice on stdin) |
+| `queue_hold_minutes` | 10 | how long room is held for a launch that was told |
+| `queue_offers`, `queue_max_hours` | 6, 24 | untaken offers, and hours in the line, before a launch leaves it |
 
 ## What it measures on Windows, exactly
 

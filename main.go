@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -20,8 +21,11 @@ const usage = `fairshare: how much room this machine has for agent work, measure
       --checkout                   the work makes a checkout, so the disk is checked too
       --cores X --mem-gb X --disk-gb X   count one new thread as this instead of the estimate
       --take --label "<what>"      when there is room, count this work until its load shows
+      --queue --key K --launcher T --request <file|->
+                                   when there is none, keep the launch in the line and tell T when its turn comes
       --reading <file|->           decide on a reading from another machine instead of this one's
       --json
+  fairshare queue [--json]         the launches waiting for room, in order; "queue drop <id>" takes one out
   fairshare reading                this machine's reading as JSON
   fairshare history [--hours N]    what the meter saw: how full, how long work waited, the reserve unused
   fairshare settings               the numbers in use and the file they come from
@@ -44,6 +48,8 @@ func main() {
 		os.Exit(cmdRoom(args))
 	case "reading":
 		err = cmdReading()
+	case "queue":
+		err = cmdQueue(args)
 	case "history":
 		err = cmdHistory(args)
 	case "settings":
@@ -151,6 +157,10 @@ func cmdRoom(args []string) int {
 	take := fs.Bool("take", false, "when there is room, count this work until its load shows")
 	label := fs.String("label", "", "what the work is, for the record")
 	from := fs.String("reading", "", "a reading from another machine (file or -)")
+	wait := fs.Bool("queue", false, "when there is no room, keep the launch in the line (needs --key and --launcher)")
+	key := fs.String("key", "", "what names this launch; the same launch sent again carries the same key")
+	launcher := fs.String("launcher", "", "the thread that asks, told when there is room")
+	request := fs.String("request", "", "the launch exactly as sent (file or -), kept with it in the line")
 	asJSON := fs.Bool("json", false, "print the whole answer as JSON")
 	fs.Parse(args)
 
@@ -165,36 +175,93 @@ func cmdRoom(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	var r Reading
-	if *from != "" {
-		r, err = readingFrom(*from)
-	} else {
-		r, err = currentReading(s)
+	ask := Ask{Threads: *threads, Count: *count, Explicit: Need{*cores, *memGB, *diskGB}, Disk: *checkout}
+	if *from != "" { // another machine's reading: the rule only, no record and no line
+		r, err := readingFrom(*from)
+		if err != nil {
+			return fail(err)
+		}
+		return answer(decide(r, s, ask, Need{}), *asJSON)
 	}
+	r, err := currentReading(s)
 	if err != nil {
 		return fail(err)
 	}
+	var body []byte
+	if *request == "-" {
+		body, _ = io.ReadAll(os.Stdin)
+	} else if *request != "" {
+		body, _ = os.ReadFile(*request)
+	}
 	now := time.Now()
 	settle := time.Duration(s.SettleMinutes * float64(time.Minute))
-	var pending Need
-	if *from == "" { // the record of threads just let in is this machine's own
-		pending = pendingNeed(now, settle)
-	}
-	ask := Ask{Threads: *threads, Count: *count, Explicit: Need{*cores, *memGB, *diskGB}, Disk: *checkout}
-	v := decide(r, s, ask, pending)
+	var v Verdict
 	took := false
-	if v.OK && *take && *from == "" {
-		if err := takeGrant(now, settle, Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, *label); err != nil {
-			fmt.Fprintln(os.Stderr, "degraded: the launch was not recorded:", err)
-		} else {
-			took = true
+	err = withLock(func() error {
+		q := loadQueue()
+		at, held := position(q, *key)
+		if *key != "" && held != nil && held.State == "offered" {
+			// Its turn: the room was held for it, so it goes in on what it was offered at.
+			v = decide(r, s, ask, Need{})
+			v.OK, v.CPU.OK, v.Mem.OK, v.Disk.OK = true, true, true, true
+			v.Reason = fmt.Sprintf("%s: this launch waited in the line %.0f minutes and room was held for it; it goes in now.", r.Machine, now.Sub(held.QueuedAt).Minutes())
+			need := held.Need
+			q = append(q[:at-1], q[at:]...)
+			if err := saveQueue(q); err != nil {
+				return err
+			}
+			took = takeGrant(now, settle, need, *label) == nil
+			return nil
 		}
+		// A new arrival passes the line only when there is room for everyone in it too.
+		v = decide(r, s, ask, pendingNeed(now, settle).plus(lineNeed(q, false)))
+		if *key != "" && held != nil {
+			v.OK = false
+			v.Reason = fmt.Sprintf("%s: this launch is already in the line, place %d of %d, waiting %.0f minutes. It is not lost: fairshare tells %s the moment there is room, and it goes in then. Do not send it again before that.",
+				r.Machine, at, len(q), now.Sub(held.QueuedAt).Minutes(), held.Launcher)
+			return nil
+		}
+		if v.OK {
+			if *take {
+				took = takeGrant(now, settle, Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, *label) == nil
+			}
+			return nil
+		}
+		if len(q) > 0 {
+			v.Reason += fmt.Sprintf(" %d launches already wait in the line and are counted first.", len(q))
+		}
+		if !*wait || *key == "" || *launcher == "" {
+			return nil
+		}
+		e := queued{ID: nextID(q), Key: *key, Launcher: *launcher, Title: *label, Threads: *threads, Count: max(*count, 1), Checkout: *checkout,
+			Need: Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, QueuedAt: now, State: "waiting"}
+		if len(body) > 0 {
+			dir := filepath.Join(homeDir(), "queue")
+			if err := os.MkdirAll(dir, 0o755); err == nil {
+				e.Request = filepath.Join(dir, fmt.Sprintf("%d.json", e.ID))
+				os.WriteFile(e.Request, body, 0o644)
+			}
+		}
+		q = append(q, e)
+		if err := saveQueue(q); err != nil {
+			return err
+		}
+		v.Reason += fmt.Sprintf(" It is now in the line, place %d: fairshare watches for room and tells %s the moment there is; send the same launch again then and it goes straight in. Do not send it again before that.", len(q), *launcher)
+		if len(s.QueueNotify) == 0 {
+			v.Reason += " degraded: queue_notify is not set, so nobody will be told; `fairshare queue` shows the line."
+		}
+		return nil
+	})
+	if err != nil {
+		return fail(err)
 	}
-	if *from == "" {
-		appendLine("decisions.jsonl", decision{At: now.UTC(), OK: v.OK, Took: took, Label: *label, Machine: v.Machine, Threads: v.Threads,
-			Count: v.Count, CPU: v.CPU, Mem: v.Mem, Disk: v.Disk, State: r.Presence.State, Reason: v.Reason}, 8<<20)
-	}
-	if *asJSON {
+	appendLine("decisions.jsonl", decision{At: now.UTC(), OK: v.OK, Took: took, Label: *label, Machine: v.Machine, Threads: v.Threads,
+		Count: v.Count, CPU: v.CPU, Mem: v.Mem, Disk: v.Disk, State: r.Presence.State, Reason: v.Reason}, 8<<20)
+	return answer(v, *asJSON)
+}
+
+func answer(v Verdict, asJSON bool) int {
+	if asJSON {
 		printJSON(v)
 	} else {
 		fmt.Println(v.Reason)
@@ -254,6 +321,9 @@ func statusText(v Verdict, s Settings) string {
 	}
 	if len(r.Others) > 0 {
 		row("everything else", programWords(r.Others, 5))
+	}
+	if q := loadQueue(); len(q) > 0 {
+		row("in the line", fmt.Sprintf("%d launches wait for room, the first for %.0f minutes (`fairshare queue`)", len(q), time.Since(q[0].QueuedAt).Minutes()))
 	}
 	if len(r.Programs) > 0 {
 		fmt.Fprintf(&b, "\n  agent work by program, last %s (processors, GB):\n", span(r.ShortSeconds))

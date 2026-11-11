@@ -277,6 +277,8 @@ func owlReserve() int {
 	return 8
 }
 
+func hideWindow(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true} }
+
 // logicalPerCore is the logical processors of one physical core (2 with SMT on).
 func logicalPerCore(logical int) int {
 	const entry = 32 // SYSTEM_LOGICAL_PROCESSOR_INFORMATION on 64-bit Windows
@@ -596,6 +598,7 @@ func runMeter() error {
 			if err := writeReading(r); err != nil {
 				fmt.Fprintln(os.Stderr, "degraded: reading not written:", err)
 			}
+			moveLine(r, s, now)
 			if now.Sub(m.lastHistory) >= time.Minute {
 				m.lastHistory = now
 				appendLine("history.jsonl", historyLine{At: r.At, Capacity: r.Capacity, Busy: r.BusyShort, Waiting: r.WaitingShort,
