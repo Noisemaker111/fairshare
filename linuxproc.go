@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -114,6 +115,39 @@ type linuxFiles struct {
 	CgroupMemMax, CgroupMemCurrent string
 	CgroupMemStat, CgroupCPUMax    string
 	PressureCPU, PressureMem       string
+	// Use is the processors in use over the short and the long window, measured from
+	// /proc/stat (cpuUse); nil when it could not be.
+	Use *cpuUse
+}
+
+// cpuUse is processors in use over two windows, with each window's length in seconds.
+type cpuUse struct {
+	Short, Long               float64
+	ShortSeconds, LongSeconds float64
+}
+
+// parseProcStat returns the busy and the total processor time, in ticks since the machine
+// started, from the first line of /proc/stat. Idle and waiting-for-disk time are not busy.
+func parseProcStat(text string) (busy, total float64, ok bool) {
+	line, _, _ := strings.Cut(text, "\n")
+	f := strings.Fields(line)
+	if len(f) < 5 || f[0] != "cpu" {
+		return 0, 0, false
+	}
+	for i, v := range f[1:] {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		if i >= 8 { // guest time is already inside user time
+			break
+		}
+		total += n
+		if i != 3 && i != 4 { // idle, iowait
+			busy += n
+		}
+	}
+	return busy, total, total > 0
 }
 
 // linuxReading builds a reading from those files. processors is the logical processors the
@@ -128,9 +162,20 @@ func linuxReading(f linuxFiles, processors int) (Reading, error) {
 	if err != nil {
 		return r, fmt.Errorf("/proc/loadavg: %w", err)
 	}
-	r.DemandShort, r.DemandLong = one, five
-	r.BusyShort, r.WaitingShort = split(one, r.Capacity)
-	r.BusyLong, r.WaitingLong = split(five, r.Capacity)
+	// The load average also counts tasks waiting on a disk or the network, which use no
+	// processor: a host read as "77 wanted of 8". Room is judged by processors in use; the load
+	// over the processors says how many tasks waited, and only while the processors were full.
+	if u := f.Use; u != nil {
+		r.BusyShort, r.BusyLong = math.Min(u.Short, r.Capacity), math.Min(u.Long, r.Capacity)
+		r.ShortSeconds, r.LongSeconds = u.ShortSeconds, u.LongSeconds
+	} else {
+		r.BusyShort, r.BusyLong = math.Min(one, r.Capacity), math.Min(five, r.Capacity)
+		r.Notes = append(r.Notes, "processor use not read; judged by the load average, which also counts tasks waiting on a disk")
+	}
+	r.WaitingShort = waitingWhenFull(math.Max(0, one-r.Capacity), r.BusyShort, r.Capacity)
+	r.WaitingLong = waitingWhenFull(math.Max(0, five-r.Capacity), r.BusyLong, r.Capacity)
+	r.DemandShort, r.DemandLong = r.BusyShort, r.BusyLong
+	r.BusyShort, r.BusyLong, r.DemandShort, r.DemandLong = round2(r.BusyShort), round2(r.BusyLong), round2(r.DemandShort), round2(r.DemandLong)
 	r.WorkCores = r.BusyShort
 	total, avail, err := parseMeminfo(f.Meminfo)
 	if err != nil {
@@ -152,12 +197,4 @@ func linuxReading(f linuxFiles, processors int) (Reading, error) {
 		r.Notes = append(r.Notes, fmt.Sprintf("tasks waited for memory in %.0f%% of the last minute", p))
 	}
 	return r, nil
-}
-
-// split divides a load average into the part that ran and the part that waited.
-func split(load, capacity float64) (busy, waiting float64) {
-	if load > capacity {
-		return capacity, load - capacity
-	}
-	return load, 0
 }

@@ -13,16 +13,22 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
 ## What it does
 
 - **Measures.** On Windows a small meter looks at the PC every 5 seconds: how busy each logical
-  processor is, how many threads want a processor and have none, free memory, free disk, what
-  fills the screen in the foreground and when the keyboard was last used. On Linux the kernel
-  already keeps those averages, so there is no meter and `fairshare reading` reads them. Both
+  processor is, how many threads waited while they were all busy, free memory, free disk, what
+  fills the screen in the foreground and when the keyboard was last used. On Linux there is no
+  meter: `fairshare reading` reads the kernel's processor-time counters against the marks its
+  earlier runs left (and for one second on a first run), and the kernel's memory numbers. Both
   give the same reading in the same units: processors, GB of memory, GB of disk.
 - **Answers one question: is there room?** `fairshare room` says yes while, with the new thread
-  counted, the processors the work wants stay under the target share of the processors agent
-  work may use, an eighth of the memory stays free and 15 GB of disk stays free. What the work
-  wants is the processors in use plus the threads waiting for one, and the higher of the last
-  minute and the last 10 minutes (5 on Linux), so neither a calm minute in a busy hour nor a calm
-  hour before a busy minute lets a thread in. A new thread counts as the machine's own measured
+  counted, the processors in use stay under the target share of the processors agent work may
+  use, an eighth of the memory stays free and 15 GB of disk stays free. Processors in use is the
+  higher of the last minute and the last 10 minutes, so neither a calm minute in a busy hour nor
+  a calm hour before a busy minute lets a thread in. Threads that are ready to run are not added
+  to it: work that is short of processors keeps them all busy, and a ready thread beside an idle
+  processor is not short of one. (Until 2026-11-11 they were added, and launches were refused
+  for half an hour at 13 of 22 processors in use, because bursts of compiler jobs averaged in as
+  38 more wanted. On Linux the load average was used, which also counts tasks waiting on a disk.)
+  How many waited while the processors were full is still shown, to say how far over a full
+  machine is. A new thread counts as the machine's own measured
   average per open thread, never under one processor and 2 GB, and threads let in during the last
   5 minutes still count at that estimate, because their load does not show yet.
 - **Keeps for the user what the user is using.** The reserve is the most the user's own programs
@@ -47,7 +53,13 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
 - **Says why.** A refusal names the numbers: processors in use, threads waiting, the limit and
   what set it, and the busiest programs. Every answer goes to `decisions.jsonl`.
 
-It never runs per command and never touches another process. The first fairshare put a hook in
+It never runs per command, and changes one thing about another process: once a minute, and when
+the reserve changes, an agent process still held on the processors of a larger reserve gets back
+every processor from the current reserve up. Owl's keeper takes reserved processors away and
+never returns them, and a process hands its set to everything it starts, so without this every
+agent session alive while a game ran stayed on half the PC for good (2026-11-11: 81 processes on
+12 of 24 processors with the reserve at 6). `release_processors` false switches it off; it
+belongs in Owl's keeper and can go when Owl does it. The first fairshare put a hook in
 front of every agent command and every process in a Windows job; that cost 130 to 160 ms a call
 and broke commands, and it was removed on 2026-11-08. That code is the tag `v1-final`.
 
@@ -106,7 +118,11 @@ read on every call. None of them is a count of threads.
 | `reserve_window_seconds` | 180 | how far back "used" looks |
 | `reserved_processors` | unset | set it to pin the reserve and switch the measuring off |
 | `sample_seconds` | 5 | how often the meter looks |
+| `release_processors` | true | give agent processes back the processors a smaller reserve freed (Owl only takes them away) |
 | `queue_notify` | unset | the command that tells a thread its launch has room (one JSON notice on stdin) |
+| `queue_place` | unset | the command that picks a machine for a waiting launch that can run on more than this one (`{"entry", "local", "usable"}` on stdin, `{"machine": "<name>"}` on stdout) |
+| `queue_order` | unset | the command that says which waiting launches go first (the line on stdin, a JSON list of ids, front first, on stdout) |
+| `queue_place_seconds` | 30 | how often, at most, those two are asked |
 | `queue_hold_minutes` | 10 | how long room is held for a launch that was told |
 | `queue_offers`, `queue_max_hours` | 6, 24 | untaken offers, and hours in the line, before a launch leaves it |
 
@@ -114,8 +130,9 @@ read on every call. None of them is a count of threads.
 
 - Processors in use: each logical processor's idle time against its total, from one
   `NtQuerySystemInformation` call. Processors from the reserve up are the agents'.
-- Threads waiting: every thread in the ready, standby or deferred-ready state, from the one call
-  that lists every process.
+- Threads waiting: the threads in the ready, standby or deferred-ready state at a look, from the
+  one call that lists every process, counted only when 90% or more of the processors they may
+  use were busy over that look. Shown, and kept in the history; not part of the room decision.
 - Agent work: processes at below-normal priority or lower, which is how Owl holds every agent
   process. The user's programs: everything else in the user's own session. A process that starts
   and ends between two looks is in the processor totals but in no program's line.

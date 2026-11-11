@@ -156,14 +156,16 @@ func reason(v Verdict, s Settings, a Ask) string {
 	}
 	var b strings.Builder
 	if v.OK {
-		fmt.Fprintf(&b, "%s has room for %s: work wants %.1f of the %.0f processors it may use (limit %.1f), %.1f GB of memory is free and %.0f GB of disk.",
+		fmt.Fprintf(&b, "%s has room for %s: work is using %.1f of the %.0f processors it may use (limit %.1f), %.1f GB of memory is free and %.0f GB of disk.",
 			r.Machine, what, v.CPU.Used+v.CPU.Pending, r.Capacity, v.CPU.Limit, r.MemAvailGB, r.DiskFreeGB)
 		return b.String()
 	}
 	fmt.Fprintf(&b, "%s has no room for %s.", r.Machine, what)
 	if !v.CPU.OK {
-		fmt.Fprintf(&b, " Work wants %.1f of the %.0f processors agent work may use (%.1f in use and %.1f waiting for one, over the last %s)",
-			v.CPU.Used, r.Capacity, busyOf(r), waitingOf(r), span(windowOf(r)))
+		fmt.Fprintf(&b, " Work is using %.1f of the %.0f processors agent work may use, over the last %s", v.CPU.Used, r.Capacity, span(windowOf(r)))
+		if w := waitingOf(r); w >= 1 {
+			fmt.Fprintf(&b, " (and %.0f more threads waited for one while they were full)", w)
+		}
 		if let := v.CPU.Pending - v.Line.Cores; let > 0.05 {
 			fmt.Fprintf(&b, ", threads let in during the last %.0f minutes count as %.1f more", s.SettleMinutes, let)
 		}
@@ -194,14 +196,7 @@ func reason(v Verdict, s Settings, a Ask) string {
 	return b.String()
 }
 
-// busyOf and waitingOf are the two halves of the window whose demand is the higher.
-func busyOf(r Reading) float64 {
-	if r.DemandLong > r.DemandShort {
-		return r.BusyLong
-	}
-	return r.BusyShort
-}
-
+// waitingOf is the threads that waited in the window whose demand is the higher.
 func waitingOf(r Reading) float64 {
 	if r.DemandLong > r.DemandShort {
 		return r.WaitingLong

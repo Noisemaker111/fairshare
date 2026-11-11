@@ -89,6 +89,7 @@ func TestLinuxReadingUsesTheContainersOwnLimits(t *testing.T) {
 		CgroupMemMax: "17179869184\n", CgroupMemCurrent: "13958643712\n", CgroupMemStat: "anon 100\ninactive_file 1073741824\nactive_file 1073741824\n",
 		CgroupCPUMax: "800000 100000\n",
 		PressureCPU:  "some avg10=40.00 avg60=22.50 avg300=9.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+		Use:          &cpuUse{Short: 8, Long: 6, ShortSeconds: 60, LongSeconds: 300},
 	}
 	r, err := linuxReading(f, 32)
 	if err != nil {
@@ -166,5 +167,32 @@ func TestWindowAveragesByTimeAndKeepsTheLeastMemory(t *testing.T) {
 	}
 	if len(w.samples) > 121 {
 		t.Fatalf("the window kept %d looks", len(w.samples))
+	}
+}
+
+// Owl's keeper takes reserved processors from agent processes and never gives them back; the
+// meter does, for a process still on the set of a larger reserve, and for no other.
+func TestOnlyAProcessLeftOnALargerReservesProcessorsIsWidened(t *testing.T) {
+	cases := []struct {
+		name     string
+		mask     uint64
+		reserved int
+		want     bool
+	}{
+		{"held off 12 when the reserve is 4", 0xFFF000, 4, true},
+		{"held off 6 when the reserve is 4", 0xFFFFC0, 4, true},
+		{"already on the reserve's own set", 0xFFFFF0, 4, false},
+		{"still has reserved processors: Owl's to move", 0xFFFFFF, 4, false},
+		{"held off 6 when the reserve is 8: Owl's to move", 0xFFFFC0, 8, false},
+		{"a set it chose for itself", 0x00F000, 4, false},
+		{"one processor in the middle", 0x000100, 4, false},
+	}
+	for _, c := range cases {
+		if got := staleReserveMask(c.mask, c.reserved, 24); got != c.want {
+			t.Errorf("%s (%#x, reserve %d): widened %v, want %v", c.name, c.mask, c.reserved, got, c.want)
+		}
+	}
+	if m := agentMask(4, 24); m != 0xFFFFF0 {
+		t.Fatalf("the agent processors with 4 reserved of 24 are %#x, want 0xFFFFF0", m)
 	}
 }

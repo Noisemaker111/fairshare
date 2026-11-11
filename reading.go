@@ -49,8 +49,9 @@ type Reading struct {
 	// The two windows the averages below cover, in seconds.
 	ShortSeconds float64 `json:"short_seconds"`
 	LongSeconds  float64 `json:"long_seconds"`
-	// Busy is processors in use on the agent processors; Waiting is threads that want a
-	// processor and have none; Demand is both, the processors the work would use if it had them.
+	// Busy is processors in use on the agent processors, and Demand, what room is judged by, is
+	// the same number. Waiting is threads that wanted a processor while those processors were
+	// full (waitingWhenFull); it says how far over a full machine is and is not added to Demand.
 	BusyShort    float64 `json:"busy_short"`
 	BusyLong     float64 `json:"busy_long"`
 	WaitingShort float64 `json:"waiting_short"`
@@ -90,6 +91,59 @@ type sample struct {
 	workCores  float64
 	programs   map[string]float64 // CPU-seconds by program, low-priority work only
 	others     map[string]float64 // and of everything else
+}
+
+// fullShare is the share of the processors work may use that must be in use, over a look, for
+// its ready threads to count as waiting.
+const fullShare = 0.9
+
+// waitingWhenFull is the threads waiting for a processor in one look: the threads ready to run
+// at its end, when the processors they may use were full over it, and none otherwise.
+//
+// Why: until 2026-11-11 every ready thread counted, in every look, and room was judged by
+// processors in use plus that count. A ready thread beside an idle processor is not short of
+// one: it is a thread caught between waking and running (one Go program showed four at every
+// look with half the PC idle), and a burst that starts a hundred compiler jobs for a few seconds
+// averaged in as dozens of processors wanted for the whole minute. On 2026-11-11 launches were
+// refused for 30 minutes at "13.1 in use, 38.1 waiting for one" of 22 processors. Work that is
+// short of processors keeps them all busy, so room is judged by processors in use alone.
+func waitingWhenFull(ready, busy, capacity float64) float64 {
+	if capacity <= 0 || busy < fullShare*capacity {
+		return 0
+	}
+	return ready
+}
+
+// agentMask is the processors agent work may use, one bit each: every one from the reserve up.
+func agentMask(reserved, processors int) uint64 {
+	var m uint64
+	for i := max(reserved, 0); i < processors && i < 64; i++ {
+		m |= 1 << uint(i)
+	}
+	return m
+}
+
+// staleReserveMask reports whether a process's processors are those of a larger reserve than
+// the one in force: a run from some processor above the reserve to the last one. Such a process
+// was held off processors the user has since stopped using, and may have them back. A process
+// that still has reserved processors is Owl's to move, and one on some other set chose it.
+//
+// Why: Owl's keeper takes the reserved processors away from agent processes and never gives
+// them back, and a process hands its set to everything it starts. With the reserve fixed at 8
+// that did not matter. Once the reserve followed the user (up to 12 while a game ran, 2 when
+// they left), every agent session alive during a game stayed on 12 processors for good: on
+// 2026-11-11, with the reserve at 6, 81 agent processes were on 12 processors and 24
+// compute-only processes kept 36 threads waiting while 8 processors stood idle.
+func staleReserveMask(mask uint64, reserved, processors int) bool {
+	if processors > 64 || mask == 0 || mask == agentMask(reserved, processors) {
+		return false
+	}
+	for k := reserved + 1; k < processors; k++ {
+		if mask == agentMask(k, processors) {
+			return true
+		}
+	}
+	return false
 }
 
 // window keeps the looks of the long window.

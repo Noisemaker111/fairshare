@@ -40,6 +40,9 @@ var (
 	procCreateMutexW                 = kernel32.NewProc("CreateMutexW")
 	procOpenMutexW                   = kernel32.NewProc("OpenMutexW")
 	procProcessIdToSessionId         = kernel32.NewProc("ProcessIdToSessionId")
+	procOpenProcess                  = kernel32.NewProc("OpenProcess")
+	procGetProcessAffinityMask       = kernel32.NewProc("GetProcessAffinityMask")
+	procSetProcessAffinityMask       = kernel32.NewProc("SetProcessAffinityMask")
 	procGetLogicalProcessorInfo      = kernel32.NewProc("GetLogicalProcessorInformation")
 	procGetLastInputInfo             = user32.NewProc("GetLastInputInfo")
 	procGetForegroundWindow          = user32.NewProc("GetForegroundWindow")
@@ -314,6 +317,33 @@ func owlExe(s Settings) string {
 	return filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "Owl", "v2", "owl.exe")
 }
 
+// releaseProcessors gives agent processes back the processors a smaller reserve freed: each
+// process of agent work (below-normal priority, Owl's own sorting) whose set is that of a larger
+// reserve gets every processor from the current reserve up. It returns how many it widened.
+func releaseProcessors(procs []procLook, reserved, processors int) int {
+	const queryLimited, setInformation = 0x1000, 0x0200
+	want := agentMask(reserved, processors)
+	n := 0
+	for _, p := range procs {
+		if p.base > belowNormalBase || p.pid <= 4 {
+			continue
+		}
+		h, _, _ := procOpenProcess.Call(queryLimited|setInformation, 0, uintptr(p.pid))
+		if h == 0 {
+			continue // not ours to change
+		}
+		var mask, system uintptr
+		if ok, _, _ := procGetProcessAffinityMask.Call(h, uintptr(unsafe.Pointer(&mask)), uintptr(unsafe.Pointer(&system))); ok != 0 &&
+			staleReserveMask(uint64(mask), reserved, processors) {
+			if ok, _, _ := procSetProcessAffinityMask.Call(h, uintptr(want&uint64(system))); ok != 0 {
+				n++
+			}
+		}
+		syscall.CloseHandle(syscall.Handle(h))
+	}
+	return n
+}
+
 // applyReserve tells Owl how many processors to hold agent work off, for a few minutes at a time:
 // the meter says it again every minute, and if the meter ever stops, Owl puts its own number back.
 func applyReserve(s Settings, n int) error {
@@ -455,6 +485,8 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		return Reading{}, false, nil
 	}
 
+	waiting = waitingWhenFull(waiting, busy, float64(len(idle)-reserved))
+	userWaiting = waitingWhenFull(userWaiting, userBusy, float64(reserved))
 	memTotal, memAvail := memStatus()
 	m.win.add(sample{at: now, seconds: seconds, busy: busy, userBusy: userBusy, waiting: waiting,
 		memAvailGB: memAvail, workCores: workCPU / seconds, programs: programs, others: others}, longWindow)
@@ -467,7 +499,7 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	r.BusyShort, r.WaitingShort, r.UserBusy, r.WorkCores, r.MemAvailGB, progCPU, otherCPU, progSeconds = m.win.means(now, shortWindow)
 	r.ShortSeconds = progSeconds
 	r.BusyLong, r.WaitingLong, _, _, _, _, _, r.LongSeconds = m.win.means(now, longWindow)
-	r.DemandShort, r.DemandLong = r.BusyShort+r.WaitingShort, r.BusyLong+r.WaitingLong
+	r.DemandShort, r.DemandLong = r.BusyShort, r.BusyLong
 	for _, f := range []*float64{&r.BusyShort, &r.BusyLong, &r.WaitingShort, &r.WaitingLong, &r.DemandShort, &r.DemandLong, &r.UserBusy, &r.WorkCores, &r.MemAvailGB, &r.ShortSeconds, &r.LongSeconds} {
 		*f = round2(*f)
 	}
@@ -510,6 +542,11 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 			m.applyErr = err.Error()
 		} else {
 			m.applyErr = ""
+			if s.ReleaseProcessors == nil || *s.ReleaseProcessors {
+				if n := releaseProcessors(procs, want, len(idle)); n > 0 {
+					appendLine("decisions.jsonl", map[string]any{"at": now.UTC(), "event": "released", "processes": n, "reserve": want}, 8<<20)
+				}
+			}
 		}
 		m.applied, m.appliedAt, m.told = want, now, true
 	}
@@ -598,7 +635,7 @@ func runMeter() error {
 			if err := writeReading(r); err != nil {
 				fmt.Fprintln(os.Stderr, "degraded: reading not written:", err)
 			}
-			moveLine(r, s, now)
+			go moveLine(r, s, now)
 			if now.Sub(m.lastHistory) >= time.Minute {
 				m.lastHistory = now
 				appendLine("history.jsonl", historyLine{At: r.At, Capacity: r.Capacity, Busy: r.BusyShort, Waiting: r.WaitingShort,
