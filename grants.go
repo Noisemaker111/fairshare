@@ -43,6 +43,18 @@ func pendingNeed(now time.Time, settle time.Duration) Need {
 	return n
 }
 
+// pendingSinceNeed is what the threads let in during the settle time, and no earlier than since,
+// count as: under an urgent hold, the threads let in before it began step aside with the rest.
+func pendingSinceNeed(now time.Time, settle time.Duration, since time.Time) Need {
+	var n Need
+	for _, g := range readGrants(now, settle) {
+		if !g.At.Before(since) {
+			n = n.plus(g.Need)
+		}
+	}
+	return n
+}
+
 // takeGrant records work that was let in. Two launches in the same instant can each miss the
 // other's record; the next look still sees both.
 func takeGrant(now time.Time, settle time.Duration, need Need, label string) error {

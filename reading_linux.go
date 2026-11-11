@@ -144,6 +144,11 @@ func currentReading(s Settings) (Reading, error) {
 
 func hideWindow(*exec.Cmd) {}
 
+// tellYield has nobody to tell on Linux: no keeper holds agent work there.
+func tellYield(Settings, time.Time) error {
+	return errors.New("nothing holds agent work back on Linux")
+}
+
 func runMeter() error {
 	return errors.New("Linux needs no meter: the kernel keeps the averages, and `fairshare reading` reads them")
 }

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 exe = sys.argv[1]
 home = tempfile.mkdtemp(prefix="fs-queue-")
 env = dict(os.environ, FAIRSHARE_HOME=home)
+env.pop("FAIRSHARE_RESERVE", None)
 told = os.path.join(home, "told.jsonl")
 notify = os.path.join(home, "notify.py")
 open(notify, "w").write("import sys\nopen(r'%s','a').write(sys.stdin.read()+'\\n')\n" % told)
@@ -14,12 +15,13 @@ json.dump({"queue_notify": [sys.executable, "-I", notify], "queue_hold_minutes":
 fails = 0
 
 
-def reading(demand):
+def reading(demand, firm=None):
     r = {"machine": "test-pc", "os": "windows", "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
          "processors": 24, "reserved": 4, "capacity": 20, "short_seconds": 60, "long_seconds": 600,
          "busy_short": min(demand, 20), "busy_long": min(demand, 20), "waiting_short": max(0, demand - 20), "waiting_long": max(0, demand - 20),
          "demand_short": demand, "demand_long": demand, "mem_total_gb": 64, "mem_avail_gb": 30, "disk_path": "C:\\", "disk_free_gb": 60,
-         "presence": {"state": "active", "idle_minutes": 0}}
+         "presence": {"state": "active", "idle_minutes": 0},
+         "firm_short": demand if firm is None else firm, "firm_long": demand if firm is None else firm}
     json.dump(r, open(os.path.join(home, "reading.json"), "w"))
 
 
@@ -118,6 +120,38 @@ code, out = fs("queue", "add", "--key", "p1", "--launcher", "thread-A", "--label
 line = {e["key"]: e for e in json.loads(fs("queue", "--json")[1])}
 check("a waiting launch sent again with more machines keeps its place and gains them", json.loads(out).get("place") == 1
       and line["p1"]["machines"] == ["pc", "host-b"], out)
+
+# Urgent first. Two Owl gates fill 17 of the 20 agent processors; Jon's and Windows' own work on
+# them is 1. Owl is a stand-in that writes down what it was told, so the real one is never asked.
+told_owl = os.path.join(home, "owl-told.txt")
+fake_owl = os.path.join(home, "owl.cmd")
+open(fake_owl, "w").write("@echo %%* >> \"%s\"\r\n" % told_owl)
+json.dump({"owl_path": fake_owl}, open(os.path.join(home, "settings.json"), "w"))
+for name in ("queue.json", "grants.json", "urgent.json"):
+    if os.path.exists(os.path.join(home, name)):
+        os.remove(os.path.join(home, name))
+day = datetime.now().strftime("%Y-%m-%d")
+json.dump({"appforgutters": {day: {"minutes": 400, "cores": 360, "mem_gb": 600}}, "owl-go": {day: {"minutes": 400, "cores": 2000, "mem_gb": 3000}}},
+          open(os.path.join(home, "repos.json"), "w"))
+reading(19, firm=1)
+code, out = fs("room", "--threads", "4", "--take", "--repo", "owl-go", "--label", "Port the engine")
+check("an ordinary launch is refused while the gates fill the PC", code == 1 and "no room" in out, out)
+code, out = fs("room", "--threads", "4", "--take", "--repo", "appforgutters", "--label", "AppForGutters production fix: uploads failing")
+check("a production fix gets room, counted as its repo's own sessions", code == 0 and "held at idle priority" in out
+      and "appforgutters sessions were measured at 0.9" in out and "production" in out, out)
+hold = json.load(open(os.path.join(home, "urgent.json")))
+said = open(told_owl).read() if os.path.exists(told_owl) else ""
+check("Owl is told to hold older sessions at idle, for three minutes", "agents set yield_before %d --for 3m --real-home" % int(datetime.fromisoformat(hold["since"].replace("Z", "+00:00")).timestamp()) in said, said)
+decided = [json.loads(l) for l in open(os.path.join(home, "decisions.jsonl")) if l.strip()]
+check("the decision is recorded as urgent", decided[-1].get("urgent") is True and decided[-1].get("repo") == "appforgutters", str(decided[-1]))
+reading(19, firm=18.5)
+code, out = fs("room", "--urgent", "--take", "--label", "second fix")
+check("urgent does not pass work that will not step aside", code == 1 and "Even with other agent work held back" in out, out)
+# Break it: Owl is missing, so nothing can hold the rest back, and the answer has to say so.
+json.dump({"owl_path": os.path.join(home, "no-owl.exe")}, open(os.path.join(home, "settings.json"), "w"))
+reading(19, firm=1)
+code, out = fs("room", "--urgent", "--take", "--label", "third fix")
+check("with no Owl to tell, the urgent answer says degraded", code == 0 and "degraded: Owl was not told" in out, out)
 
 shutil.rmtree(home, ignore_errors=True)
 print("failures:", fails)

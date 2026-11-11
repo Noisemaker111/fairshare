@@ -31,15 +31,33 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   machine is. A new thread counts as the machine's own measured
   average per open thread, never under one processor and 2 GB, and threads let in during the last
   5 minutes still count at that estimate, because their load does not show yet.
-- **Keeps for the user what the user is using.** The reserve is the most the user's own programs
-  used in the last 3 minutes, times 1.5 (times 2 while something is full screen), in whole
-  physical cores. It grows on the look that sees them use more or wait for a processor, and
-  shrinks only after the whole window has been quieter. It remembers what each full-screen program
-  needed the last time, so a game gets its processors on its first look, and what the desk needed
-  before the user walked away, which is put back on the first key press. Nobody tells it anything.
-  The least is one physical core and the most is half the machine. Owl holds agent work off the
-  reserved processors; fairshare tells it the number for three minutes at a time and says it again
-  every minute, so if the meter ever stops, Owl puts its own number back.
+- **Puts urgent work first.** A launch with `--urgent`, or whose title holds one of
+  `urgent_words` ("production", "hotfix", "outage", ...), is judged against the work that would not
+  step aside for it: the user's own and Windows' on the agent processors, and agent sessions started
+  since an urgent hold began. When it is let in, Owl's keeper holds every agent session older than it
+  at idle priority (its `yield_before`, told for three minutes and again every minute), so Windows
+  runs the urgent session first and the older work on what it leaves. Nothing is paused or ended.
+  The hold stands for 20 minutes, then while a session started since is running, and never past
+  two hours. The processors kept for the user stay theirs: urgent work is held off them like all
+  agent work. Why: on 2026-11-11 a production fix for AppForGutters was refused room because two Owl
+  Rust ports' gates used 17 of the 18 agent processors, and had to go to a host that cannot deploy.
+- **Counts a thread as its repo's own.** The meter adds up, each minute, what every agent
+  session's process tree used, under the repo its runner works in (the runner's current folder:
+  `.t3\worktrees\<repo>\...`). A launch with `--repo` counts as that repo's average over the last
+  7 days once it has 30 session-minutes, instead of the machine's average per open thread: an Owl
+  thread compiling Rust measured 4.5 processors, an AppForGutters thread about 1. `fairshare repos`
+  lists them.
+- **Keeps processors for the user only while a game runs.** Jon's rule (2026-11-11): two
+  processors kept (`reserve_min_processors`) so the desktop never fails, unless a game runs. A game
+  is a program full screen (not a browser or player named in `not_games`), a program named in
+  `games`, or one seen full screen before. While one runs, the reserve is the most the game's own
+  processes used in the last 3 minutes, times 2, in whole physical cores, plus a core while its
+  threads wait for a processor; it remembers what each game needed last time, so it gets its
+  processors on its first look. Windows' own background work (dwm, Defender, the search indexer)
+  is not the user and sizes nothing: on 2026-11-11 counting it kept 6 with nobody at the PC. The
+  most is half the machine. Owl holds agent work off the reserved processors; fairshare tells it
+  the number for three minutes at a time and again every minute, so if the meter ever stops, Owl
+  puts its own number back.
 - **Keeps the line.** A launch that finds no room is not lost. With `--queue` it waits in
   fairshare's line with its whole request, in the order it came. After every look the meter checks
   the front of the line; when the machine has room for it, that room is held for 10 minutes and the
@@ -82,7 +100,7 @@ and removes the task. On Linux there is nothing to install: copy `fairshare-linu
 
 ```
 fairshare status                 what the machine has, what work is taking, and whether a thread fits
-fairshare room --threads 7 --checkout --take --label "<what>"
+fairshare room --threads 7 --checkout --take --label "<what>" [--repo <name>] [--urgent]
                                  the answer a launch asks for: exit 0 room, 1 no room, 2 cannot tell
 fairshare room ... --queue --key <k> --launcher <thread> --request <file|->
                                  no room: wait in the line; the launcher is told when its turn comes
@@ -90,6 +108,7 @@ fairshare queue                  the line, in order; `queue drop <id>` takes a l
 fairshare room --reading <file>  the same rule on a reading from another machine
 fairshare reading                this machine's reading as JSON
 fairshare history --hours 24     how full it ran, how long work waited, the reserve unused
+fairshare repos                  what a session of each repo was measured using
 fairshare settings               the numbers in use and the file they come from
 ```
 
@@ -113,7 +132,8 @@ read on every call. None of them is a count of threads.
 | `settle_minutes` | 5 | how long a thread just let in counts at its estimate |
 | `reserve_min_processors` | 2 | the least kept for the user |
 | `reserve_max_share` | 0.5 | the most, as a share of the machine |
-| `reserve_headroom`, `reserve_headroom_full_screen` | 1.5, 2 | room over what the user's programs used |
+| `reserve_headroom_full_screen` | 2 | room over what a running game's own processes used (`reserve_headroom` is no longer used) |
+| `games`, `not_games` | 7daystodie.exe; browsers, players, T3, Owl | programs that are games while they run, and programs that are never games even full screen |
 | `reserve_window_seconds` | 180 | how far back "used" looks |
 | `reserved_processors` | unset | set it to pin the reserve and switch the measuring off |
 | `sample_seconds` | 5 | how often the meter looks |
@@ -123,6 +143,10 @@ read on every call. None of them is a count of threads.
 | `queue_place_seconds` | 30 | how often, at most, those two are asked |
 | `queue_hold_minutes` | 10 | how long room is held for a launch that was told |
 | `queue_offers`, `queue_max_hours` | 6, 24 | untaken offers, and hours in the line, before a launch leaves it |
+| `urgent_words` | urgent, production, prod fix, hotfix, outage | whole words in a title or repo that make a launch urgent |
+| `urgent_least_minutes`, `urgent_most_minutes` | 20, 120 | how long an urgent hold stands at least, and at most after the latest urgent launch |
+| `runners` | claude.exe, codex.exe, opencode.exe | the programs that are one agent session each (Windows) |
+| `repo_days`, `repo_min_minutes` | 7, 30 | the days a repo's estimate averages, and the session-minutes it needs first |
 
 ## What it measures on Windows, exactly
 
