@@ -284,3 +284,26 @@ func TestTheQuestionIsTheOneALaunchAsks(t *testing.T) {
 		t.Errorf("a broken list was read as a command")
 	}
 }
+
+func TestABareBashOnWindowsIsGitBash(t *testing.T) {
+	git := `C:\Program Files\Git\bin\bash.exe`
+	has := func(path string) bool { return path == git }
+	none := func(string) bool { return false }
+	cases := []struct {
+		name, program, files string
+		exists               func(string) bool
+		want                 string
+	}{
+		{"bash is Git Bash when Git is installed", "bash", `C:\Program Files`, has, git},
+		{"so is bash.exe, in any case", "Bash.EXE", `C:\Program Files`, has, git},
+		{"with no ProgramFiles in the environment the usual folder is tried", "bash", "", has, git},
+		{"without Git it stays what was asked for", "bash", `C:\Program Files`, none, "bash"},
+		{"a full path is left alone", `D:\msys\bash.exe`, `C:\Program Files`, has, `D:\msys\bash.exe`},
+		{"any other program is left alone", "bun", `C:\Program Files`, has, "bun"},
+	}
+	for _, c := range cases {
+		if got := gitBash(c.program, c.files, c.exists); got != c.want {
+			t.Errorf("%s: %q", c.name, got)
+		}
+	}
+}
