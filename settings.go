@@ -47,8 +47,9 @@ type Settings struct {
 	// answers at once when they come back. ReserveMaxShare is the most, as a share of the machine.
 	ReserveMinProcessors int     `json:"reserve_min_processors"`
 	ReserveMaxShare      float64 `json:"reserve_max_share"`
-	// ReserveHeadroom multiplies the most the user's programs used in the last
-	// ReserveWindowSeconds; ReserveHeadroomFullScreen does while something fills the screen.
+	// ReserveHeadroomFullScreen multiplies the most a running game's own processes used in the last
+	// ReserveWindowSeconds. ReserveHeadroom is no longer used: with no game the reserve is
+	// ReserveMinProcessors (Jon, 2026-11-11).
 	ReserveHeadroom           float64 `json:"reserve_headroom"`
 	ReserveHeadroomFullScreen float64 `json:"reserve_headroom_full_screen"`
 	ReserveWindowSeconds      float64 `json:"reserve_window_seconds"`
@@ -71,8 +72,28 @@ type Settings struct {
 	QueueHoldMinutes  float64  `json:"queue_hold_minutes"`
 	QueueOffers       int      `json:"queue_offers"`
 	QueueMaxHours     float64  `json:"queue_max_hours"`
+	// Games are programs (image names) that make the reserve game-sized while they run, full screen
+	// or not; a program seen full screen is learned as one too, unless NotGames names it (a browser
+	// playing a video full screen is not a game).
+	Games    []string `json:"games"`
+	NotGames []string `json:"not_games"`
 	// DiskPath is the folder whose disk is measured. Unset: the home folder's disk.
 	DiskPath string `json:"disk_path,omitempty"`
+	// UrgentWords make a launch urgent when its title or repo holds one (case does not matter);
+	// --urgent does too. An urgent launch is judged against the work that would not step aside
+	// for it, and once let in, every agent session older than it is held at idle priority by Owl
+	// for UrgentLeastMinutes, then while a session started since is running, and never longer
+	// than UrgentMostMinutes after the latest urgent launch.
+	UrgentWords        []string `json:"urgent_words"`
+	UrgentLeastMinutes float64  `json:"urgent_least_minutes"`
+	UrgentMostMinutes  float64  `json:"urgent_most_minutes"`
+	// Runners are the programs that are one agent session each (Windows): their process trees are
+	// measured per repo, and one started since an urgent hold began keeps it standing.
+	Runners []string `json:"runners"`
+	// RepoDays is how many days of a repo's measured sessions its estimate averages, and
+	// RepoMinMinutes how many session-minutes it needs before it replaces the machine's average.
+	RepoDays       float64 `json:"repo_days"`
+	RepoMinMinutes float64 `json:"repo_min_minutes"`
 }
 
 func defaultSettings() Settings {
@@ -94,11 +115,20 @@ func defaultSettings() Settings {
 		ReserveHeadroom:           1.5,
 		ReserveHeadroomFullScreen: 2,
 		ReserveWindowSeconds:      180,
+		Games:                     []string{"7daystodie.exe"},
+		NotGames:                  []string{"chrome.exe", "msedge.exe", "firefox.exe", "vlc.exe", "explorer.exe", "applicationframehost.exe", "t3 code.exe", "t3 code (nightly).exe", "owl.exe"},
 
 		QueueHoldMinutes:  10,
 		QueuePlaceSeconds: 30,
 		QueueOffers:       6,
 		QueueMaxHours:     24,
+
+		UrgentWords:        []string{"urgent", "production", "prod fix", "hotfix", "outage"},
+		UrgentLeastMinutes: 20,
+		UrgentMostMinutes:  120,
+		Runners:            []string{"claude.exe", "codex.exe", "opencode.exe"},
+		RepoDays:           7,
+		RepoMinMinutes:     30,
 	}
 }
 
@@ -162,7 +192,7 @@ func (s Settings) check() error {
 		v    float64
 	}{{"away_minutes", s.AwayMinutes}, {"thread_cores", s.ThreadCores}, {"thread_mem_gb", s.ThreadMemGB}, {"settle_minutes", s.SettleMinutes}, {"sample_seconds", s.SampleSeconds},
 		{"reserve_headroom", s.ReserveHeadroom}, {"reserve_headroom_full_screen", s.ReserveHeadroomFullScreen}, {"reserve_window_seconds", s.ReserveWindowSeconds},
-		{"queue_hold_minutes", s.QueueHoldMinutes}, {"queue_place_seconds", s.QueuePlaceSeconds}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)}} {
+		{"queue_hold_minutes", s.QueueHoldMinutes}, {"urgent_least_minutes", s.UrgentLeastMinutes}, {"urgent_most_minutes", s.UrgentMostMinutes}, {"repo_days", s.RepoDays}, {"repo_min_minutes", s.RepoMinMinutes}, {"queue_place_seconds", s.QueuePlaceSeconds}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)}} {
 		if c.v <= 0 {
 			return fmt.Errorf("%s is %v; it must be more than 0", c.name, c.v)
 		}
