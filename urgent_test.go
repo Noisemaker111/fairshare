@@ -18,7 +18,7 @@ func gates(state string) Reading {
 
 func TestAnUrgentLaunchIsJudgedByTheWorkThatWouldNotStepAside(t *testing.T) {
 	s := defaultSettings()
-	afg := &repoNeed{Repo: "appforgutters", Cores: 0.9, MemGB: 1.5, Minutes: 400}
+	afg := []level{{Name: "appforgutters threads here", Minutes: 400, Cores: 0.9, MeanSq: 0.81, MemGB: 1.5, Own: true}}
 	cases := []struct {
 		name string
 		r    Reading
@@ -26,9 +26,9 @@ func TestAnUrgentLaunchIsJudgedByTheWorkThatWouldNotStepAside(t *testing.T) {
 		ok   bool
 		says string
 	}{
-		{"the production fix of 2026-11-11 was refused", gates("active"), Ask{Threads: 4, Repo: afg}, false, "no room"},
-		{"marked urgent it gets room", gates("active"), Ask{Threads: 4, Repo: afg, Urgent: true}, true, "held at idle priority"},
-		{"urgent counts its repo's own sessions", gates("active"), Ask{Threads: 4, Repo: afg, Urgent: true}, true, "appforgutters sessions were measured at 0.9"},
+		{"the production fix of 2026-11-11 was refused", gates("active"), Ask{Threads: 4, Learned: afg}, false, "no room"},
+		{"marked urgent it gets room", gates("active"), Ask{Threads: 4, Learned: afg, Urgent: true}, true, "held at idle priority"},
+		{"urgent counts its repo's own sessions", gates("active"), Ask{Threads: 4, Learned: afg, Urgent: true}, true, "appforgutters threads here were measured at 0.9"},
 		{"urgent does not pass work that will not step aside", func() Reading { r := gates("active"); r.FirmShort = 16.5; return r }(), Ask{Urgent: true}, false, "Even with other agent work held back"},
 		{"urgent still keeps memory free", func() Reading { r := gates("active"); r.MemAvailGB = 8.5; return r }(), Ask{Urgent: true}, false, "GB is kept free"},
 		{"urgent still leaves the reserve to Jon", func() Reading {
@@ -123,12 +123,12 @@ func TestGrantsBeforeAnUrgentHoldStepAsideWithTheRest(t *testing.T) {
 	t.Setenv("FAIRSHARE_HOME", t.TempDir())
 	now := time.Now()
 	settle := 5 * time.Minute
-	takeGrant(now.Add(-3*time.Minute), settle, Need{Cores: 4.5}, "owl port")
-	takeGrant(now.Add(-time.Minute), settle, Need{Cores: 1}, "urgent fix")
+	takeGrant(now.Add(-3*time.Minute), settle, grant{Need: Need{Cores: 4.5}, Label: "owl port"})
+	takeGrant(now.Add(-time.Minute), settle, grant{Need: Need{Cores: 1}, Label: "urgent fix"})
 	if got := pendingSinceNeed(now, settle, now.Add(-2*time.Minute)); got.Cores != 1 {
 		t.Fatalf("pending since the hold = %v, want 1", got.Cores)
 	}
-	if got := pendingNeed(now, settle); got.Cores != 5.5 {
+	if got := pendingNeed(now, settle, nil); got.Cores != 5.5 {
 		t.Fatalf("pending = %v, want 5.5", got.Cores)
 	}
 }

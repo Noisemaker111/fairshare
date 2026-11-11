@@ -79,7 +79,7 @@ func TestANewArrivalPassesTheLineOnlyWithRoomForEveryoneInIt(t *testing.T) {
 		t.Fatalf("an arrival took the room the line waits for: %s", v.Reason)
 	}
 	// The refusal says which part is the line and which is threads just let in.
-	for _, want := range []string{"last 5 minutes count as 1.0 more", "ahead of it in the line count as 9.0 more"} {
+	for _, want := range []string{"not yet seen running counts as 1.0 more", "ahead of it in the line count as 9.0 more"} {
 		if !strings.Contains(v.Reason, want) {
 			t.Fatalf("reason lacks %q: %s", want, v.Reason)
 		}

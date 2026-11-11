@@ -14,10 +14,12 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
 
 - **Measures.** On Windows a small meter looks at the PC every 5 seconds: how busy each logical
   processor is, how many threads waited while they were all busy, free memory, free disk, what
-  fills the screen in the foreground and when the keyboard was last used. On Linux there is no
-  meter: `fairshare reading` reads the kernel's processor-time counters against the marks its
-  earlier runs left (and for one second on a first run), and the kernel's memory numbers. Both
-  give the same reading in the same units: processors, GB of memory, GB of disk.
+  fills the screen in the foreground and when the keyboard was last used. On Linux the machine's
+  own numbers come from the kernel: `fairshare reading` reads its processor-time counters against
+  the marks its earlier runs left (and for one second on a first run), and its memory numbers.
+  Both give the same reading in the same units: processors, GB of memory, GB of disk. On both, a
+  meter also measures which work uses what (below); on Linux the first question a machine is
+  asked starts it.
 - **Answers one question: is there room?** `fairshare room` says yes while, with the new thread
   counted, the processors in use stay under the target share of the processors agent work may
   use, an eighth of the memory stays free and 15 GB of disk stays free. Processors in use is the
@@ -28,9 +30,41 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   for half an hour at 13 of 22 processors in use, because bursts of compiler jobs averaged in as
   38 more wanted. On Linux the load average was used, which also counts tasks waiting on a disk.)
   How many waited while the processors were full is still shown, to say how far over a full
-  machine is. A new thread counts as the machine's own measured
-  average per open thread, never under one processor and 2 GB, and threads let in during the last
-  5 minutes still count at that estimate, because their load does not show yet.
+  machine is.
+- **Learns what work uses, and sizes nothing by a number somebody chose.** Every look, each
+  process is put under the piece of work it belongs to: a thread (an agent runner and everything
+  it started), a run (a command the pool ran here), or a job (work in a repo's worktree that no
+  thread on the machine owns). Each piece's minutes are recorded, and a new piece counts as what
+  work like it was measured using, the nearest kind first: a thread as its repo's threads on this
+  machine, then every thread here; a run as that command in that repo, then the repo's runs, then
+  every run; and, while this machine has measured little, as what another machine of the pool
+  measured for it. Ten measured minutes, or one finished run, weigh as much as everything wider;
+  minutes fade by half every three days, so a repo that changed is re-learned. `fairshare
+  learned` lists it. Only where nothing like the work was ever measured anywhere does it start
+  at the settings' floor (1 processor, 2 GB), or at its caller's `--cores`; both stop mattering as
+  soon as there are minutes. Why: until 2026-11-11 a thread counted as one average per repo
+  (appforgutters 1, owl-go 4.5) and a gate as `--cores 4` typed by its caller. Jon: "every thread
+  and every process is different".
+- **Follows work that leaves its thread.** A process stays with the piece of work it started
+  under after the processes between them are gone, and one found with nothing above it is placed
+  by the T3 thread it was started for (Linux) or the folder it runs in. That is most of the load:
+  measured on a boat host on 2026-11-11, six threads' runners and their living children used
+  0.05 processors while the machine ran at 3.2, because the land a thread starts in the
+  background outlives the shell that started it. Before this, none of that counted as any
+  thread's.
+- **Counts open work as what it is expected to use, not what it uses this minute.** Six threads
+  waiting on their models before each runs a gate are not an idle machine. Each open piece is
+  expected to use what its own minutes say (the recent ones most), and until it has enough of
+  them, what work like it used. What counts as in use is the higher of the processors busy now
+  and that expectation. And because open work does not all peak in the same minute, room is kept
+  for its swing taken together (the spreads of the pieces add as squares), not for every piece's
+  peak: a steady build needs its average, one bursty thread needs well over its average, ten
+  bursty threads need far less than ten peaks. Memory the open work is expected to reach and has
+  not taken yet is kept for it the same way.
+- **Counts a launch only until it is seen running.** Work let in a moment ago counts at its
+  estimate until the meter sees it (a new piece of its kind and repo), then as itself. A run
+  counts for exactly as long as it runs. Work that never shows up stops counting after 5
+  minutes (`settle_minutes`), which is also all a machine with no meter running has.
 - **Puts urgent work first.** A launch with `--urgent`, or whose title holds one of
   `urgent_words` ("production", "hotfix", "outage", ...), is judged against the work that would not
   step aside for it: the user's own and Windows' on the agent processors, and agent sessions started
@@ -41,12 +75,6 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   two hours. The processors kept for the user stay theirs: urgent work is held off them like all
   agent work. Why: on 2026-11-11 a production fix for AppForGutters was refused room because two Owl
   Rust ports' gates used 17 of the 18 agent processors, and had to go to a host that cannot deploy.
-- **Counts a thread as its repo's own.** The meter adds up, each minute, what every agent
-  session's process tree used, under the repo its runner works in (the runner's current folder:
-  `.t3\worktrees\<repo>\...`). A launch with `--repo` counts as that repo's average over the last
-  7 days once it has 30 session-minutes, instead of the machine's average per open thread: an Owl
-  thread compiling Rust measured 4.5 processors, an AppForGutters thread about 1. `fairshare repos`
-  lists them.
 - **Keeps processors for the user only while a game runs.** Jon's rule (2026-11-11): two
   processors kept (`reserve_min_processors`) so the desktop never fails, unless a game runs. A game
   is a program full screen (not a browser or player named in `not_games`), a program named in
@@ -94,21 +122,26 @@ go build -o fairshare.exe . && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o
 and registers the scheduled task
 `fairshare-meter`, which starts the meter with no window, within a minute of logon, and again
 within a minute if it ever ends. No admin rights. `fairshare install --uninstall` stops the meter
-and removes the task. On Linux there is nothing to install: copy `fairshare-linux` anywhere.
+and removes the task. On Linux there is nothing to install: copy `fairshare-linux` anywhere. The
+first question it is asked starts its meter, apart from the command that asked; the meter ends
+when the file it was started from is replaced, so a new build takes over at the next question.
+`fairshare install --uninstall` stops it, and `FAIRSHARE_METER=off` keeps it from starting.
 
 ## Commands
 
 ```
 fairshare status                 what the machine has, what work is taking, and whether a thread fits
-fairshare room --threads 7 --checkout --take --label "<what>" [--repo <name>] [--urgent]
+fairshare room --checkout --take --label "<what>" [--repo <name>] [--urgent]
                                  the answer a launch asks for: exit 0 room, 1 no room, 2 cannot tell
+fairshare room --kind run --what "<command>" --repo <name>
+                                 the same for a run of a command (the pool asks this)
 fairshare room ... --queue --key <k> --launcher <thread> --request <file|->
                                  no room: wait in the line; the launcher is told when its turn comes
 fairshare queue                  the line, in order; `queue drop <id>` takes a launch out
 fairshare room --reading <file>  the same rule on a reading from another machine
 fairshare reading                this machine's reading as JSON
 fairshare history --hours 24     how full it ran, how long work waited, the reserve unused
-fairshare repos                  what a session of each repo was measured using
+fairshare learned                what each kind of work was measured using: threads by repo, runs by command
 fairshare pool                   every machine that joined, as one place (see The pool)
 fairshare settings               the numbers in use and the file they come from
 ```
@@ -136,11 +169,19 @@ fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install &
 - **Each machine answers for itself.** The pool asks every member `fairshare room`, the question a
   launch already asks one machine, and compares the answers. The processors kept for the person at
   the PC are out of the pool before the pool sees them, and a machine's own settings, line and
-  measured repos decide its answer.
+  measured work decide its answer.
 - **The most room wins.** Of the machines that have room, the work goes to the one with the most
-  processors left once it is counted. `--take` counts it there until its load shows, and the
+  processors left once it is counted. `--take` counts it there until it is seen running, and the
   answer that takes it is the one that decides, so two launches at once cannot both be told yes
   on room for one.
+- **Each machine sizes the work, and the pool passes the news.** The same gate is not the same
+  load on a 24-processor PC and an 8-processor host, so each machine counts work as what it
+  measured itself. The machine that measured a piece of work most is the one the others are told
+  about (`seen.json` on the machine that places), so a machine that just joined does not count a
+  gate it has never run as next to nothing; its own minutes take over as it gets them. A
+  placement's answer says what the work counts as on each machine and what that came from.
+  `--cores` and `--mem-gb` are a caller's guess, used only where nothing like the work was ever
+  measured.
 - **Plan-hours.** A machine with a `wake` command that does not answer is asleep. It is woken
   only when no machine that is awake has room, and when it has an `hours` command, only while
   that prints more plan-hours left than the member's `keep_hours`. Hours that cannot be read are
@@ -150,6 +191,10 @@ fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install &
   machine that has the repo's folder, checked on the machine at that moment.
 - **A run.** `pool run` runs the command in the repo's folder on the machine picked, through that
   machine's own fairshare, and its exit is the command's (69 when the pool could not run it).
+  The command is the work: it is learned under its own words (without the shell in front and the
+  commit ids and long numbers that change from run to run), with how long it lasts, and it counts
+  on its machine for as long as it runs. A placement that is run by its caller says so with
+  `pool place --run "<command>"`.
   With `--commit` it runs in a fresh checkout of exactly that commit, which is removed after; the
   folder's own checkout is not touched. On a member with a `busy_dir` it leaves its process id
   there while it runs, so the machine's idle watch does not put it to sleep under the run.
@@ -207,8 +252,13 @@ read on every call. None of them is a count of threads.
 | `away_minutes` | 10 | no keyboard or mouse for this long is away |
 | `mem_reserve_fraction` | 0.125 | share of memory that always stays free |
 | `disk_reserve_gb` | 15 | disk that always stays free where work is checked out |
-| `thread_cores`, `thread_mem_gb`, `thread_disk_gb` | 1, 2, 5 | the least a new thread counts as |
-| `settle_minutes` | 5 | how long a thread just let in counts at its estimate |
+| `thread_cores`, `thread_mem_gb` | 1, 2 | what a piece of work counts as where nothing like it was ever measured |
+| `thread_disk_gb` | 5 | what a checkout counts as |
+| `settle_minutes` | 5 | how long work let in counts at its estimate when it is never seen running |
+| `learn_trust_minutes`, `learn_trust_runs` | 10, 1 | the measured minutes, and the finished runs, of a kind of work that weigh as much as everything wider known about it |
+| `learn_half_life_days` | 3 | measured minutes count for half after this long |
+| `learn_recent_minutes` | 30 | the same for a running piece of work's own minutes: what it did lately says most about what it does next |
+| `learn_margin` | 1 | how much of the open work's swing, taken together, is kept free; 0 keeps none |
 | `reserve_min_processors` | 2 | the least kept for the user |
 | `reserve_max_share` | 0.5 | the most, as a share of the machine |
 | `reserve_headroom_full_screen` | 2 | room over what a running game's own processes used (`reserve_headroom` is no longer used) |
@@ -224,8 +274,10 @@ read on every call. None of them is a count of threads.
 | `queue_offers`, `queue_max_hours` | 6, 24 | untaken offers, and hours in the line, before a launch leaves it |
 | `urgent_words` | urgent, production, prod fix, hotfix, outage | whole words in a title or repo that make a launch urgent |
 | `urgent_least_minutes`, `urgent_most_minutes` | 20, 120 | how long an urgent hold stands at least, and at most after the latest urgent launch |
-| `runners` | claude.exe, codex.exe, opencode.exe | the programs that are one agent session each (Windows) |
-| `repo_days`, `repo_min_minutes` | 7, 30 | the days a repo's estimate averages, and the session-minutes it needs first |
+| `runners` | claude.exe, codex.exe, opencode.exe | the programs that are one agent thread each, named with or without `.exe` |
+
+`repo_days` and `repo_min_minutes` are no longer used; a settings file that still has them is
+read as before.
 
 ## What it measures on Windows, exactly
 
@@ -236,11 +288,33 @@ read on every call. None of them is a count of threads.
   use were busy over that look. Shown, and kept in the history; not part of the room decision.
 - Agent work: processes at below-normal priority or lower, which is how Owl holds every agent
   process. The user's programs: everything else in the user's own session. A process that starts
-  and ends between two looks is in the processor totals but in no program's line.
+  and ends between two looks is in the processor totals but in no program's line, and in no
+  piece of work's minutes.
+- Which work: a process belongs to the nearest runner or run above it by its parents, and keeps
+  that after they are gone. An agent process with nothing above it is placed by the folder it
+  runs in (read from its process parameters, once).
 - Memory: free physical memory, or free commit when that is less; the least seen in the last
   minute. Disk: the home folder's drive.
 - Full screen: what Windows reports for notifications, or a borderless window covering its whole
   monitor. A maximized window is not full screen.
+
+## What it measures on Linux, exactly
+
+- The machine: processors in use from `/proc/stat` between two marks, memory from
+  `/proc/meminfo`, a container's own limits from its cgroup. No meter is needed for these.
+- Which work: the meter reads every `/proc/<pid>/stat` each look. A process's time there includes
+  its ended children's, so a compiler job that started and ended between two looks is counted,
+  under the process that started it. A process with nothing above it is placed by
+  `T3CODE_THREAD_ID` in its environment, then by its folder.
+- Memory of a piece of work is the resident memory of its processes added up, which counts
+  shared pages more than once.
+
+## Measured on a boat host (2026-11-11, 8 processors, 16 GB, six threads open)
+
+| | by the runners' own process trees | with detached work followed |
+|---|---|---|
+| processors the six threads used, 4 minutes | 0.05 | 3.2 (one thread's land: vitest, a local backend, a browser) |
+| what a new thread of that repo then counted as | the floor, 1.0 | what the repo's threads were measured using |
 
 ## Measured on Jon's PC (2026-11-10, Ryzen 9 3900X, 24 logical processors, 64 GB)
 

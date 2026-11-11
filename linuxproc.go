@@ -4,7 +4,8 @@ package main
 // load average is the tasks that ran or waited for a processor over 1, 5 and 15 minutes, and
 // MemAvailable is the memory a new program could take without swapping. A container sees its
 // host's /proc, so its own limits come from the cgroup files when they are there. These parsers
-// take the files' text, so they are tested on any machine.
+// take the files' text, so they are tested on any machine. The same goes for the per-process
+// files the Linux meter reads to see which work uses what.
 
 import (
 	"fmt"
@@ -199,4 +200,120 @@ func linuxReading(f linuxFiles, processors int) (Reading, error) {
 		r.Notes = append(r.Notes, fmt.Sprintf("tasks waited for memory in %.0f%% of the last minute", p))
 	}
 	return r, nil
+}
+
+// pidStat is one process as /proc/<pid>/stat describes it.
+type pidStat struct {
+	pid, parent uint32
+	name        string
+	// ticks is the processor time of the process and of every child it has waited for, so the
+	// time of a compiler job that started and ended between two looks is still counted, under
+	// the process that started it.
+	ticks float64
+	// start is when it began, in ticks since the machine started; pages its resident memory.
+	start uint64
+	pages float64
+}
+
+// parsePidStat reads one /proc/<pid>/stat. The name sits in brackets and may itself hold spaces
+// and brackets, so the fields are counted from the last closing one.
+func parsePidStat(text string) (pidStat, bool) {
+	var p pidStat
+	open, shut := strings.IndexByte(text, '('), strings.LastIndexByte(text, ')')
+	if open < 0 || shut < open {
+		return p, false
+	}
+	pid, err := strconv.ParseUint(strings.TrimSpace(text[:open]), 10, 32)
+	if err != nil {
+		return p, false
+	}
+	f := strings.Fields(text[shut+1:])
+	// After the name: state(0) ppid(1) ... utime(11) stime(12) cutime(13) cstime(14) ... starttime(19) vsize(20) rss(21)
+	if len(f) < 22 {
+		return p, false
+	}
+	parent, err := strconv.ParseUint(f[1], 10, 32)
+	if err != nil {
+		return p, false
+	}
+	for _, i := range []int{11, 12, 13, 14} {
+		v, err := strconv.ParseFloat(f[i], 64)
+		if err != nil {
+			return p, false
+		}
+		p.ticks += v
+	}
+	if p.start, err = strconv.ParseUint(f[19], 10, 64); err != nil {
+		return p, false
+	}
+	if p.pages, err = strconv.ParseFloat(f[21], 64); err != nil {
+		return p, false
+	}
+	p.pid, p.parent, p.name = uint32(pid), uint32(parent), text[open+1:shut]
+	return p, true
+}
+
+// parseBootTime returns when the machine started, in seconds since 1970, from /proc/stat.
+func parseBootTime(text string) (float64, bool) {
+	for _, line := range strings.Split(text, "\n") {
+		if rest, ok := strings.CutPrefix(line, "btime "); ok {
+			v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
+			return v, err == nil
+		}
+	}
+	return 0, false
+}
+
+// procSeen is what the look before knew of a process.
+type procSeen struct {
+	seconds float64 // its processor time then, its waited-for children's included
+	parent  procKey
+}
+
+// usedSince turns two looks into what each living process used between them. A process's time
+// includes its waited-for children's, so a child that ended since the look before shows up in
+// its parent, whole: what was already counted for it while it lived is taken off the nearest
+// ancestor still alive, which leaves that ancestor with its own use and the child's last moments.
+// A look is not one instant, so a parent can be read a moment before its child's time lands on
+// it; what was taken off too early is carried in carry to the look in which it lands. first says
+// there was no look before, and then nothing is counted.
+func usedSince(now, before map[procKey]procSeen, carry map[procKey]float64, first bool) map[procKey]float64 {
+	used := make(map[procKey]float64, len(now))
+	if first {
+		return used
+	}
+	for k, p := range now {
+		if b, seen := before[k]; seen {
+			used[k] = p.seconds - b.seconds
+		} else {
+			used[k] = p.seconds
+		}
+		used[k] += carry[k]
+	}
+	for k, b := range before {
+		if _, alive := now[k]; alive {
+			continue
+		}
+		up := b.parent
+		for hops := 0; hops < 64; hops++ {
+			if _, alive := now[up]; alive {
+				used[up] -= b.seconds
+				break
+			}
+			gone, known := before[up]
+			if !known {
+				break
+			}
+			up = gone.parent
+		}
+	}
+	for k := range carry {
+		delete(carry, k)
+	}
+	for k, v := range used {
+		if v < 0 {
+			carry[k], used[k] = v, 0
+		}
+	}
+	return used
 }

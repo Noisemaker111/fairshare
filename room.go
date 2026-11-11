@@ -8,10 +8,16 @@ package main
 // A thread is let in while, after it is counted, the processors the work wants stay under the
 // target share of the processors agent work may use, the memory reserve stays free and the disk
 // reserve stays free. The work's want is the higher of its short and long average, so neither a
-// calm minute in a busy hour nor a calm hour before a busy minute lets a thread in. A new thread
-// is counted at the machine's own measured average per open thread, and never at less than the
-// settings' floor; threads let in during the last settle time are still counted at that estimate,
-// because their load does not show yet.
+// calm minute in a busy hour nor a calm hour before a busy minute lets a thread in.
+//
+// Nothing is counted at a number somebody chose. The new work counts as what work like it was
+// measured using (learn.go). The work already open counts as what each piece is expected to use,
+// from its own measured minutes, even while it is quiet: six threads waiting on their models
+// before each runs a gate are not an idle machine. And because open work does not all peak in the
+// same minute, room is kept for its swing taken together (the spreads add as squares), not for
+// every piece's peak: a steady build needs its average, a bursty thread needs more than its
+// average, ten bursty threads need far less than ten peaks. Work let in a moment ago counts at
+// its estimate only until the meter sees it running, and then as itself.
 
 import (
 	"fmt"
@@ -37,8 +43,8 @@ func (n Need) plus(o Need) Need {
 // Limit is one resource's side of the answer.
 type Limit struct {
 	OK bool `json:"ok"`
-	// Used is what is taken now, Pending what threads just let in are counted as, Need what the
-	// new work is counted as, and Limit the most the three may add up to.
+	// Used is what counts as taken now, Pending what work let in and not yet seen running is
+	// counted as, Need what the new work adds, and Limit the most the three may add up to.
 	Used    float64 `json:"used"`
 	Pending float64 `json:"pending"`
 	Need    float64 `json:"need"`
@@ -61,25 +67,42 @@ type Verdict struct {
 	Line Need `json:"line"`
 	// Urgent says the launch was judged as urgent: against the work that would not step aside.
 	Urgent bool `json:"urgent,omitempty"`
-	// Repo is the repo's measured need when the estimate came from it.
-	Repo    *repoNeed `json:"repo,omitempty"`
-	Reading Reading   `json:"reading"`
+	// Sized is what one piece of the new work is expected to use and what that was learned from;
+	// Measured what this machine itself measured for exactly this work, for the pool to pass on.
+	Sized    Sizing  `json:"sized"`
+	Measured *Sizing `json:"measured,omitempty"`
+	// Open is the work already open here as the rule counted it: how many pieces, what they use
+	// over the short window, what they are expected to use, and their swing taken together.
+	Open    OpenWork `json:"open"`
+	Reading Reading  `json:"reading"`
+}
+
+// OpenWork is the open work of a machine, added up.
+type OpenWork struct {
+	Pieces int     `json:"pieces"`
+	Now    float64 `json:"now"`
+	Expect float64 `json:"expect"`
+	Swing  float64 `json:"swing"`
+	// Rest is the processors in use that belong to no piece of work.
+	Rest float64 `json:"rest"`
 }
 
 // Ask is what the caller wants room for.
 type Ask struct {
 	// Threads is how many agent threads are open on the machine now; 0 when the caller does not
-	// know, and then a new thread is counted at the settings' floor.
+	// know. It matters only on a machine that has measured no work yet.
 	Threads int
-	// Count is how many new threads are asked for at once.
+	// Count is how many new pieces are asked for at once.
 	Count int
-	// Explicit, when a field is more than 0, replaces the estimate for one new thread.
+	// Explicit is the caller's own guess. Its processors and memory are where the estimate starts,
+	// and stand only until work like this is measured; its disk replaces the checkout's.
 	Explicit Need
 	// Disk says the work makes a checkout, so the disk is checked too.
 	Disk bool
-	// Repo, when set, is what a session of the launch's repo was measured using; it replaces the
-	// machine's average per open thread.
-	Repo *repoNeed
+	// Kind is "run" for a run; anything else is a thread.
+	Kind string
+	// Learned is the evidence about work like this, the widest level first (learned.levels).
+	Learned []level
 	// Urgent judges the launch against the work that would not step aside for it.
 	Urgent bool
 }
@@ -94,66 +117,80 @@ func cpuTarget(r Reading, s Settings) float64 {
 	return s.CPUTarget
 }
 
-// estimate is what one new thread is counted as on this machine.
-func estimate(r Reading, s Settings, a Ask) Need {
-	n := Need{Cores: s.ThreadCores, MemGB: s.ThreadMemGB}
-	if a.Repo != nil {
-		// What this repo's own sessions were measured using: an Owl thread compiling Rust and
-		// an AppForGutters thread waiting on its model are not the same thread.
-		n.Cores = max(n.Cores, min(a.Repo.Cores, r.Capacity))
-		n.MemGB = max(n.MemGB, min(a.Repo.MemGB, r.MemTotalGB/4))
-	} else if a.Threads > 0 {
-		// The machine's own average per open thread, capped so one heavy hour cannot make every
-		// later thread look as heavy as a quarter of the machine.
+// estimate is what one new piece of work is counted as on this machine, and what that came from.
+func estimate(r Reading, s Settings, a Ask) (Need, Sizing) {
+	base := Need{Cores: s.ThreadCores, MemGB: s.ThreadMemGB}
+	if len(a.Learned) == 0 && a.Threads > 0 {
+		// A machine that has measured no work yet: its average per open thread, capped so one
+		// heavy hour cannot make every later thread look as heavy as a quarter of the machine.
 		demand := math.Max(r.DemandShort, r.DemandLong)
-		n.Cores = math.Max(n.Cores, math.Min(demand/float64(a.Threads), r.Capacity/4))
+		base.Cores = math.Max(base.Cores, math.Min(demand/float64(a.Threads), r.Capacity/4))
 		work := r.WorkMemGB
 		if r.OS == "linux" {
 			work = r.MemTotalGB - r.MemAvailGB
 		}
-		n.MemGB = math.Max(n.MemGB, math.Min(work/float64(a.Threads), r.MemTotalGB/8))
-	}
-	if a.Disk {
-		n.DiskGB = s.ThreadDiskGB
+		base.MemGB = math.Max(base.MemGB, math.Min(work/float64(a.Threads), r.MemTotalGB/8))
 	}
 	if a.Explicit.Cores > 0 {
-		n.Cores = a.Explicit.Cores
+		base.Cores = a.Explicit.Cores
 	}
 	if a.Explicit.MemGB > 0 {
-		n.MemGB = a.Explicit.MemGB
+		base.MemGB = a.Explicit.MemGB
+	}
+	sz := size(base, a.Learned, s.LearnTrustMinutes)
+	// No piece of work uses more processors than the machine has, and one that was measured
+	// holding most of a bigger machine's memory is not refused here for ever.
+	sz.Cores = math.Min(sz.Cores, r.Capacity)
+	sz.Swing = math.Min(sz.Swing, r.Capacity-sz.Cores)
+	sz.MemGB = math.Min(sz.MemGB, r.MemTotalGB/2)
+	n := Need{Cores: sz.Cores, MemGB: sz.MemGB}
+	if a.Disk {
+		n.DiskGB = s.ThreadDiskGB
 	}
 	if a.Explicit.DiskGB > 0 {
 		n.DiskGB = a.Explicit.DiskGB
 	}
-	return n
+	return n, sz
 }
 
-// decide answers for one machine. pending is what threads let in during the settle time count as.
+// decide answers for one machine. pending is what work let in and not yet seen running counts as.
 func decide(r Reading, s Settings, a Ask, pending Need) Verdict {
 	return decideBehind(r, s, a, pending, Need{})
 }
 
-// decideBehind answers for a launch that arrives behind a line: granted is what threads let in
-// during the settle time count as, line what the launches waiting ahead of it do.
+// decideBehind answers for a launch that arrives behind a line: granted is what work let in and
+// not yet seen running counts as, line what the launches waiting ahead of it do.
 func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 	pending := granted.plus(line)
 	if a.Count < 1 {
 		a.Count = 1
 	}
-	need := estimate(r, s, a).times(a.Count)
+	one, sz := estimate(r, s, a)
+	need := one.times(a.Count)
 	target := cpuTarget(r, s)
-	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r, Line: line, Urgent: a.Urgent, Repo: a.Repo}
+	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r, Line: line, Urgent: a.Urgent, Sized: sz}
+	v.Sized.Cores, v.Sized.Swing, v.Sized.MemGB = round2(sz.Cores), round2(sz.Swing), round2(sz.MemGB)
 
-	demand := math.Max(r.DemandShort, r.DemandLong)
+	// What is counted as in use: the processors busy over the short and the long window, and
+	// what the open work is expected to use with room for its swing, whichever is most.
+	busy := math.Max(r.DemandShort, r.DemandLong)
+	now, expect, swingSq, memOwed := openWork(r.Work)
+	rest := math.Max(0, r.DemandShort-now)
+	v.Open = OpenWork{Pieces: len(r.Work), Now: round2(now), Expect: round2(expect), Swing: round2(math.Sqrt(swingSq)), Rest: round2(rest)}
+	used := math.Max(busy, rest+expect+s.LearnMargin*math.Sqrt(swingSq))
+	after := math.Max(busy+need.Cores, rest+expect+need.Cores+s.LearnMargin*math.Sqrt(swingSq+float64(a.Count)*sz.Swing*sz.Swing))
 	if a.Urgent {
-		demand = math.Max(r.FirmShort, r.FirmLong)
+		// The open work steps aside for it, so only what would not is counted.
+		used = math.Max(r.FirmShort, r.FirmLong)
+		after = used + need.Cores
+		memOwed = 0
 	}
-	v.CPU = Limit{Used: demand, Pending: pending.Cores, Need: need.Cores, Limit: r.Capacity * target, Unit: "processors"}
-	v.CPU.OK = demand+pending.Cores+need.Cores <= v.CPU.Limit+1e-9
+	v.CPU = Limit{Used: used, Pending: pending.Cores, Need: after - used, Limit: r.Capacity * target, Unit: "processors"}
+	v.CPU.OK = used+pending.Cores+v.CPU.Need <= v.CPU.Limit+1e-9
 
 	reserve := r.MemTotalGB * s.MemReserveFraction
-	v.Mem = Limit{Used: r.MemTotalGB - r.MemAvailGB, Pending: pending.MemGB, Need: need.MemGB, Limit: r.MemTotalGB - reserve, Unit: "GB of memory"}
-	v.Mem.OK = v.Mem.Used+pending.MemGB+need.MemGB <= v.Mem.Limit+1e-9
+	v.Mem = Limit{Used: r.MemTotalGB - r.MemAvailGB, Pending: pending.MemGB + memOwed, Need: need.MemGB, Limit: r.MemTotalGB - reserve, Unit: "GB of memory"}
+	v.Mem.OK = v.Mem.Used+v.Mem.Pending+need.MemGB <= v.Mem.Limit+1e-9
 
 	v.Disk = Limit{OK: true, Pending: pending.DiskGB, Need: need.DiskGB, Limit: r.DiskFreeGB - s.DiskReserveGB, Unit: "GB of disk"}
 	if a.Disk {
@@ -165,20 +202,67 @@ func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 	return v
 }
 
+// countedWords says what the new work counts as and why.
+func countedWords(v Verdict, a Ask) string {
+	what := "it counts"
+	if v.Count > 1 {
+		what = "they count"
+	}
+	switch {
+	case v.Sized.From != "":
+		text := fmt.Sprintf("%s as %.1f processors", what, v.CPU.Need)
+		if v.Sized.Swing >= 0.1 && v.Count == 1 {
+			text += fmt.Sprintf(" (%.1f expected and %.1f for its swing)", v.Sized.Cores, v.CPU.Need-v.Sized.Cores)
+		}
+		text += ": " + sizedWords(v.Sized)
+		if math.Abs(v.Sized.Cores-v.Sized.FromCores) >= 0.3 {
+			text += ", too few minutes yet to count alone"
+		}
+		return text
+	case a.Explicit.Cores > 0:
+		return fmt.Sprintf("%s as %.1f processors, its caller's own number, until work like it is measured here", what, v.CPU.Need)
+	case a.Threads > 0:
+		return fmt.Sprintf("%s as %.1f processors, the machine's average per open thread, until work like it is measured here", what, v.CPU.Need)
+	}
+	return fmt.Sprintf("%s as %.1f processors: %s", what, v.CPU.Need, sizedWords(v.Sized))
+}
+
+// openWords says what the open work was counted as, when that is more than it uses this minute.
+func openWords(v Verdict) string {
+	r := v.Reading
+	if v.Urgent || v.Open.Pieces == 0 || v.CPU.Used <= math.Max(r.DemandShort, r.DemandLong)+0.05 {
+		return ""
+	}
+	text := fmt.Sprintf(" The %d pieces of work open here use %.1f this minute and are expected to use %.1f", v.Open.Pieces, v.Open.Now, v.Open.Expect)
+	if v.Open.Pieces == 1 {
+		text = fmt.Sprintf(" The one piece of work open here uses %.1f this minute and is expected to use %.1f", v.Open.Now, v.Open.Expect)
+	}
+	if v.Open.Swing >= 0.1 {
+		text += fmt.Sprintf(", give or take %.1f", v.Open.Swing)
+	}
+	if v.Open.Rest >= 0.1 {
+		text += fmt.Sprintf(", beside %.1f that is no piece of work", v.Open.Rest)
+	}
+	return text + fmt.Sprintf(": counted as %.1f in use.", v.CPU.Used)
+}
+
 func reason(v Verdict, s Settings, a Ask) string {
 	r := v.Reading
 	what := "a new thread"
 	if v.Count > 1 {
 		what = fmt.Sprintf("%d new threads", v.Count)
 	}
+	if a.Kind == "run" {
+		what = "this run"
+		if v.Count > 1 {
+			what = fmt.Sprintf("%d of this run", v.Count)
+		}
+	}
 	if v.Urgent {
 		what = "an urgent " + strings.TrimPrefix(what, "a ")
 	}
 	var b strings.Builder
-	counted := fmt.Sprintf("it counts as %.1f processors, the machine's average per open thread", v.CPU.Need)
-	if v.Repo != nil {
-		counted = fmt.Sprintf("it counts as %.1f processors: %s", v.CPU.Need, repoWords(*v.Repo))
-	}
+	counted := countedWords(v, a)
 	if v.OK {
 		if v.Urgent {
 			held := math.Max(r.DemandShort, r.DemandLong) - v.CPU.Used
@@ -186,8 +270,8 @@ func reason(v Verdict, s Settings, a Ask) string {
 				r.Machine, what, v.CPU.Used+v.CPU.Pending, r.Capacity, v.CPU.Limit, counted, max(0, held))
 			return b.String()
 		}
-		fmt.Fprintf(&b, "%s has room for %s: work is using %.1f of the %.0f processors it may use (limit %.1f), %.1f GB of memory is free and %.0f GB of disk; %s.",
-			r.Machine, what, v.CPU.Used+v.CPU.Pending, r.Capacity, v.CPU.Limit, r.MemAvailGB, r.DiskFreeGB, counted)
+		fmt.Fprintf(&b, "%s has room for %s: work is using %.1f of the %.0f processors it may use (limit %.1f), %.1f GB of memory is free and %.0f GB of disk; %s.%s",
+			r.Machine, what, math.Max(r.DemandShort, r.DemandLong)+v.CPU.Pending, r.Capacity, v.CPU.Limit, r.MemAvailGB, r.DiskFreeGB, counted, openWords(v))
 		return b.String()
 	}
 	fmt.Fprintf(&b, "%s has no room for %s.", r.Machine, what)
@@ -195,21 +279,26 @@ func reason(v Verdict, s Settings, a Ask) string {
 		if v.Urgent {
 			fmt.Fprintf(&b, " Even with other agent work held back, work that does not step aside uses %.1f of the %.0f processors agent work may use", v.CPU.Used, r.Capacity)
 		} else {
-			fmt.Fprintf(&b, " Work is using %.1f of the %.0f processors agent work may use, over the last %s", v.CPU.Used, r.Capacity, span(windowOf(r)))
+			fmt.Fprintf(&b, " Work is using %.1f of the %.0f processors agent work may use, over the last %s", math.Max(r.DemandShort, r.DemandLong), r.Capacity, span(windowOf(r)))
 		}
 		if w := waitingOf(r); w >= 1 {
 			fmt.Fprintf(&b, " (and %.0f more threads waited for one while they were full)", w)
 		}
+		if over := v.CPU.Used - math.Max(r.DemandShort, r.DemandLong); !v.Urgent && over > 0.05 {
+			fmt.Fprintf(&b, ", the work open here is expected to use %.1f more than it does now", over)
+		}
 		if let := v.CPU.Pending - v.Line.Cores; let > 0.05 {
-			fmt.Fprintf(&b, ", threads let in during the last %.0f minutes count as %.1f more", s.SettleMinutes, let)
+			fmt.Fprintf(&b, ", work let in and not yet seen running counts as %.1f more", let)
 		}
 		if v.Line.Cores > 0 {
 			fmt.Fprintf(&b, ", the launches ahead of it in the line count as %.1f more", v.Line.Cores)
 		}
 		fmt.Fprintf(&b, ", and %s counts as %.1f; the limit is %.1f (%.0f%%%s).", what, v.CPU.Need, v.CPU.Limit, v.Target*100, presenceWords(r.Presence))
-		if v.Repo != nil {
-			fmt.Fprintf(&b, " %s.", repoWords(*v.Repo))
+		if v.Sized.From != "" {
+			words := sizedWords(v.Sized)
+			fmt.Fprintf(&b, " %s%s.", strings.ToUpper(words[:1]), words[1:])
 		}
+		b.WriteString(openWords(v))
 		if top := programWords(r.Programs, 4); top != "" {
 			fmt.Fprintf(&b, " Busiest: %s.", top)
 		}
@@ -218,7 +307,7 @@ func reason(v Verdict, s Settings, a Ask) string {
 		fmt.Fprintf(&b, " %.1f GB of %.0f GB of memory is free, %.1f GB is kept free, and %s counts as %.1f GB",
 			r.MemAvailGB, r.MemTotalGB, r.MemTotalGB*s.MemReserveFraction, what, v.Mem.Need)
 		if v.Mem.Pending > 0 {
-			fmt.Fprintf(&b, " on top of %.1f GB for threads just let in", v.Mem.Pending)
+			fmt.Fprintf(&b, " on top of %.1f GB that work let in or open here is still expected to take", v.Mem.Pending)
 		}
 		b.WriteString(".")
 	}
@@ -226,7 +315,7 @@ func reason(v Verdict, s Settings, a Ask) string {
 		fmt.Fprintf(&b, " %s has %.1f GB free, %.0f GB is kept free, and %s with a checkout counts as %.0f GB",
 			r.DiskPath, r.DiskFreeGB, s.DiskReserveGB, what, v.Disk.Need)
 		if v.Disk.Pending > 0 {
-			fmt.Fprintf(&b, " on top of %.0f GB for threads just let in", v.Disk.Pending)
+			fmt.Fprintf(&b, " on top of %.0f GB for work just let in", v.Disk.Pending)
 		}
 		b.WriteString(".")
 	}

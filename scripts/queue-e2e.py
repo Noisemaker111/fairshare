@@ -1,12 +1,13 @@
 # The line end to end, through the built fairshare.exe in a private home: real files, real lock,
 # the real notify command run by fairshare. The reading is written by hand so "full" and "room" are
-# certain whatever the PC is doing. Usage: python -I queue-e2e.py <fairshare.exe>
+# certain whatever the PC is doing. Usage: python -I queue-e2e.py <fairshare program>
+# (Windows and Linux; on Linux there is no Owl to tell, so that one check is left to Windows)
 import json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timezone
 
 exe = sys.argv[1]
 home = tempfile.mkdtemp(prefix="fs-queue-")
-env = dict(os.environ, FAIRSHARE_HOME=home)
+env = dict(os.environ, FAIRSHARE_HOME=home, FAIRSHARE_READING=os.path.join(home, "reading.json"), FAIRSHARE_METER="off")
 env.pop("FAIRSHARE_RESERVE", None)
 told = os.path.join(home, "told.jsonl")
 notify = os.path.join(home, "notify.py")
@@ -130,18 +131,22 @@ json.dump({"owl_path": fake_owl}, open(os.path.join(home, "settings.json"), "w")
 for name in ("queue.json", "grants.json", "urgent.json"):
     if os.path.exists(os.path.join(home, name)):
         os.remove(os.path.join(home, name))
-day = datetime.now().strftime("%Y-%m-%d")
-json.dump({"appforgutters": {day: {"minutes": 400, "cores": 360, "mem_gb": 600}}, "owl-go": {day: {"minutes": 400, "cores": 2000, "mem_gb": 3000}}},
-          open(os.path.join(home, "repos.json"), "w"))
+# What the meter learned: 400 minutes of AppForGutters threads at 0.9 processors, 400 of Owl threads at 5.
+at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+json.dump({"thread|appforgutters|": {"at": at, "minutes": 400, "cores": 360, "sq": 324, "mem_gb": 600, "mem_peak": 1.5},
+           "thread|owl-go|": {"at": at, "minutes": 400, "cores": 2000, "sq": 10000, "mem_gb": 3000, "mem_peak": 7.5}},
+          open(os.path.join(home, "learned.json"), "w"))
 reading(19, firm=1)
 code, out = fs("room", "--threads", "4", "--take", "--repo", "owl-go", "--label", "Port the engine")
-check("an ordinary launch is refused while the gates fill the PC", code == 1 and "no room" in out, out)
+check("an ordinary launch is refused while the gates fill the PC, counted as an Owl thread", code == 1 and "no room" in out
+      and "owl-go threads here were measured at 5.0 processors" in out.lower(), out)
 code, out = fs("room", "--threads", "4", "--take", "--repo", "appforgutters", "--label", "AppForGutters production fix: uploads failing")
-check("a production fix gets room, counted as its repo's own sessions", code == 0 and "held at idle priority" in out
-      and "appforgutters sessions were measured at 0.9" in out and "production" in out, out)
+check("a production fix gets room, counted as what its repo's threads were measured using", code == 0 and "held at idle priority" in out
+      and "appforgutters threads here were measured at 0.9" in out and "production" in out, out)
 hold = json.load(open(os.path.join(home, "urgent.json")))
 said = open(told_owl).read() if os.path.exists(told_owl) else ""
-check("Owl is told to hold older sessions at idle, for three minutes", "agents set yield_before %d --for 3m --real-home" % int(datetime.fromisoformat(hold["since"].replace("Z", "+00:00")).timestamp()) in said, said)
+if os.name == "nt":
+    check("Owl is told to hold older sessions at idle, for three minutes", "agents set yield_before %d --for 3m --real-home" % int(datetime.fromisoformat(hold["since"].replace("Z", "+00:00")).timestamp()) in said, said)
 decided = [json.loads(l) for l in open(os.path.join(home, "decisions.jsonl")) if l.strip()]
 check("the decision is recorded as urgent", decided[-1].get("urgent") is True and decided[-1].get("repo") == "appforgutters", str(decided[-1]))
 reading(19, firm=18.5)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 // Settings are the numbers the room rule and the meter use.
@@ -28,9 +29,9 @@ type Settings struct {
 	MemReserveFraction float64 `json:"mem_reserve_fraction"`
 	// DiskReserveGB always stays free on the disk work is checked out on.
 	DiskReserveGB float64 `json:"disk_reserve_gb"`
-	// ThreadCores, ThreadMemGB and ThreadDiskGB are the least a new thread is counted as until
-	// its own load shows in the measurements. The machine's measured average per open thread is
-	// used when that is more.
+	// ThreadCores and ThreadMemGB are what a piece of work counts as while nothing like it has been
+	// measured anywhere: where the estimate starts, not a least once it is measured (learn.go).
+	// ThreadDiskGB is what a checkout counts as.
 	ThreadCores  float64 `json:"thread_cores"`
 	ThreadMemGB  float64 `json:"thread_mem_gb"`
 	ThreadDiskGB float64 `json:"thread_disk_gb"`
@@ -87,13 +88,30 @@ type Settings struct {
 	UrgentWords        []string `json:"urgent_words"`
 	UrgentLeastMinutes float64  `json:"urgent_least_minutes"`
 	UrgentMostMinutes  float64  `json:"urgent_most_minutes"`
-	// Runners are the programs that are one agent session each (Windows): their process trees are
-	// measured per repo, and one started since an urgent hold began keeps it standing.
+	// Runners are the programs that are one agent session each, named with or without ".exe": the
+	// work under each is measured as that thread's, and one started since an urgent hold began
+	// keeps it standing.
 	Runners []string `json:"runners"`
-	// RepoDays is how many days of a repo's measured sessions its estimate averages, and
-	// RepoMinMinutes how many session-minutes it needs before it replaces the machine's average.
+	// RepoDays and RepoMinMinutes are no longer used: what a repo's work takes is learned by
+	// learn.go, which has no window and no threshold.
 	RepoDays       float64 `json:"repo_days"`
 	RepoMinMinutes float64 `json:"repo_min_minutes"`
+	// LearnTrustMinutes is how many measured minutes of a kind of work weigh as much as everything
+	// wider that is known about it; LearnHalfLifeDays how fast old minutes fade.
+	LearnTrustMinutes float64 `json:"learn_trust_minutes"`
+	LearnHalfLifeDays float64 `json:"learn_half_life_days"`
+	// LearnTrustRuns is how many finished runs of a command weigh as much as LearnTrustMinutes.
+	LearnTrustRuns float64 `json:"learn_trust_runs"`
+	// LearnRecentMinutes is the half-life of a running piece of work's own minutes: what it did
+	// lately says more about its next minutes than what it did an hour ago.
+	LearnRecentMinutes float64 `json:"learn_recent_minutes"`
+	// LearnMargin is how much of the open work's swing (the spread of its measured minutes, taken
+	// together) is kept free on top of what it is expected to use. 0 keeps none.
+	LearnMargin float64 `json:"learn_margin"`
+}
+
+func (s Settings) halfLife() time.Duration {
+	return time.Duration(s.LearnHalfLifeDays * 24 * float64(time.Hour))
 }
 
 func defaultSettings() Settings {
@@ -129,6 +147,12 @@ func defaultSettings() Settings {
 		Runners:            []string{"claude.exe", "codex.exe", "opencode.exe"},
 		RepoDays:           7,
 		RepoMinMinutes:     30,
+
+		LearnTrustMinutes:  10,
+		LearnHalfLifeDays:  3,
+		LearnTrustRuns:     1,
+		LearnRecentMinutes: 30,
+		LearnMargin:        1,
 	}
 }
 
@@ -192,10 +216,14 @@ func (s Settings) check() error {
 		v    float64
 	}{{"away_minutes", s.AwayMinutes}, {"thread_cores", s.ThreadCores}, {"thread_mem_gb", s.ThreadMemGB}, {"settle_minutes", s.SettleMinutes}, {"sample_seconds", s.SampleSeconds},
 		{"reserve_headroom", s.ReserveHeadroom}, {"reserve_headroom_full_screen", s.ReserveHeadroomFullScreen}, {"reserve_window_seconds", s.ReserveWindowSeconds},
-		{"queue_hold_minutes", s.QueueHoldMinutes}, {"urgent_least_minutes", s.UrgentLeastMinutes}, {"urgent_most_minutes", s.UrgentMostMinutes}, {"repo_days", s.RepoDays}, {"repo_min_minutes", s.RepoMinMinutes}, {"queue_place_seconds", s.QueuePlaceSeconds}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)}} {
+		{"queue_hold_minutes", s.QueueHoldMinutes}, {"urgent_least_minutes", s.UrgentLeastMinutes}, {"urgent_most_minutes", s.UrgentMostMinutes}, {"repo_days", s.RepoDays}, {"repo_min_minutes", s.RepoMinMinutes}, {"queue_place_seconds", s.QueuePlaceSeconds}, {"queue_max_hours", s.QueueMaxHours}, {"queue_offers", float64(s.QueueOffers)},
+		{"learn_trust_minutes", s.LearnTrustMinutes}, {"learn_half_life_days", s.LearnHalfLifeDays}, {"learn_recent_minutes", s.LearnRecentMinutes}, {"learn_trust_runs", s.LearnTrustRuns}} {
 		if c.v <= 0 {
 			return fmt.Errorf("%s is %v; it must be more than 0", c.name, c.v)
 		}
+	}
+	if s.LearnMargin < 0 {
+		return fmt.Errorf("learn_margin is %v; it cannot be negative", s.LearnMargin)
 	}
 	if s.DiskReserveGB < 0 || s.ThreadDiskGB < 0 {
 		return fmt.Errorf("disk_reserve_gb and thread_disk_gb cannot be negative")

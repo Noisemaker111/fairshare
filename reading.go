@@ -80,8 +80,11 @@ type Reading struct {
 	DiskPath   string  `json:"disk_path"`
 	DiskFreeGB float64 `json:"disk_free_gb"`
 
-	Presence Presence  `json:"presence"`
-	Programs []Program `json:"programs,omitempty"`
+	Presence Presence `json:"presence"`
+	// Work is every piece of work open on the machine (work.go): each thread, run and job with
+	// what it uses and what it is expected to use. Empty when nothing measures it.
+	Work     []LiveWork `json:"work,omitempty"`
+	Programs []Program  `json:"programs,omitempty"`
 	// Others are the busiest programs that are not low-priority work: the user's own apps and
 	// Windows itself.
 	Others []Program `json:"others,omitempty"`

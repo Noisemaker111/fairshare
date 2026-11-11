@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTheMachineWithTheMostRoomTakesIt(t *testing.T) {
@@ -263,13 +264,19 @@ func TestThePlacementSaysEachMachinesNumber(t *testing.T) {
 
 func TestTheQuestionIsTheOneALaunchAsks(t *testing.T) {
 	w := work{Label: "fix uploads", Repo: "appforgutters", Count: 2, Checkout: true, Urgent: true, Explicit: Need{Cores: 4, MemGB: 6.5}, Threads: map[string]int{"pc": 7}}
-	got := strings.Join(w.roomArgs(member{Name: "pc"}, true), " ")
+	got := strings.Join(w.roomArgs(member{Name: "pc"}, true, nil), " ")
 	if got != "room --json --count 2 --checkout --repo appforgutters --urgent --cores 4 --mem-gb 6.5 --threads 7 --label fix uploads --take" {
 		t.Errorf("the PC is asked %q", got)
 	}
-	got = strings.Join(work{}.roomArgs(member{Name: "host"}, false), " ")
+	got = strings.Join(work{}.roomArgs(member{Name: "host"}, false, nil), " ")
 	if got != "room --json --count 1" {
 		t.Errorf("a bare piece of work asks %q", got)
+	}
+	// A run says what it is, and carries what another machine measured for it.
+	gate := work{Repo: "appforgutters", Kind: "run", What: "bun run gate"}
+	got = strings.Join(gate.roomArgs(member{Name: "host"}, false, &Sizing{Cores: 5.2, Swing: 0.8, MemGB: 6, Minutes: 90, From: "`bun run gate` in appforgutters on pc"}), " ")
+	if got != "room --json --count 1 --kind run --what bun run gate --seen "+`{"cores":5.2,"swing":0.8,"mem_gb":6,"minutes":90,"from":"`+"`bun run gate` in appforgutters on pc"+`"}`+" --repo appforgutters" {
+		t.Errorf("a run asks %q", got)
 	}
 	for text, want := range map[string][]string{
 		"boat ssh bx_1": {"boat", "ssh", "bx_1"},
@@ -305,5 +312,52 @@ func TestABareBashOnWindowsIsGitBash(t *testing.T) {
 		if got := gitBash(c.program, c.files, c.exists); got != c.want {
 			t.Errorf("%s: %q", c.name, got)
 		}
+	}
+}
+
+func TestThePoolPassesOnWhatTheMachineThatMeasuredMostSays(t *testing.T) {
+	now := time.Date(2026, 11, 11, 18, 0, 0, 0, time.UTC)
+	gate := work{Repo: "AppForGutters", Kind: "run", What: "bun run gate"}
+	says := func(name string, minutes, cores float64) reply {
+		a := reply{Name: name, State: "room", verdict: &Verdict{}}
+		if minutes > 0 {
+			a.verdict.Measured = &Sizing{Cores: cores, Minutes: minutes, From: "`bun run gate` in appforgutters on " + name}
+		}
+		return a
+	}
+	n := news{}
+	if n.tell(gate, "t3-host-2") != nil {
+		t.Fatal("news before any machine measured it")
+	}
+	changed := n.hear(gate, []reply{says("pc", 90, 12), says("t3-host-1", 20, 6.5), says("t3-host-2", 0, 0), {Name: "asleep", State: "asleep"}}, now)
+	if !changed || n[gate.newsKey()].Machine != "pc" {
+		t.Fatalf("the machine with the most minutes is the one to pass on: %+v", n)
+	}
+	// A machine is told what another measured, never its own.
+	if got := n.tell(gate, "t3-host-2"); got == nil || got.Cores != 12 || got.From != "`bun run gate` in appforgutters on pc" {
+		t.Fatalf("the new host is told %+v", got)
+	}
+	if n.tell(gate, "pc") != nil {
+		t.Fatal("the PC was told its own measurement")
+	}
+	// The command is the work: another command, another repo, and a thread of this repo are other news.
+	for _, other := range []work{{Repo: "appforgutters", Kind: "run", What: "bun run lint"}, {Repo: "owl-go", Kind: "run", What: "bun run gate"}, {Repo: "appforgutters"}} {
+		if n.tell(other, "t3-host-2") != nil {
+			t.Errorf("%+v was told the gate's measurement", other)
+		}
+	}
+	// The PC's own newer word replaces its older; a machine with fewer minutes does not replace it
+	// until the PC's word is a day old.
+	n.hear(gate, []reply{says("pc", 95, 11), says("t3-host-1", 30, 6.5)}, now.Add(time.Hour))
+	if got := n.tell(gate, "t3-host-2"); got.Cores != 11 {
+		t.Fatalf("after the PC measured again: %+v", got)
+	}
+	n.hear(gate, []reply{says("t3-host-1", 30, 6.5)}, now.Add(30*time.Hour))
+	if got := n.tell(gate, "t3-host-2"); got.Cores != 6.5 {
+		t.Fatalf("with the PC silent for a day the host that still measures it is heard: %+v", got)
+	}
+	// Work in no repo is nobody's news.
+	if n.hear(work{Kind: "run", What: "ls"}, []reply{says("pc", 5, 1)}, now) || (work{}).newsKey() != "" {
+		t.Fatal("work without a repo was kept as news")
 	}
 }

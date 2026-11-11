@@ -42,7 +42,7 @@ func TestRoomFollowsWhatWorkTakesNotHowManyThreads(t *testing.T) {
 		{"memory reserve holds", pc(2, 2, 9, 60, "active"), Ask{}, Need{}, false, "8.0 GB is kept free"},
 		{"disk reserve holds for a checkout", pc(2, 2, 40, 18, "active"), Ask{Disk: true}, Need{}, false, "15 GB is kept free"},
 		{"disk is not checked without a checkout", pc(2, 2, 40, 6.9, "active"), Ask{}, Need{}, true, "has room"},
-		{"threads just let in still count", pc(4, 4, 40, 60, "active"), Ask{}, Need{Cores: 10}, false, "count as 10.0 more"},
+		{"threads just let in still count", pc(4, 4, 40, 60, "active"), Ask{}, Need{Cores: 10}, false, "not yet seen running counts as 10.0 more"},
 		{"a batch counts each thread", pc(8, 8, 40, 60, "active"), Ask{Count: 7}, Need{}, false, "7 new threads"},
 		{"an explicit need replaces the estimate", pc(8, 8, 40, 60, "active"), Ask{Explicit: Need{Cores: 8}}, Need{}, false, "counts as 8.0"},
 	}
@@ -103,17 +103,17 @@ func TestGrantsCountOnlyForTheSettleTime(t *testing.T) {
 	now := time.Date(2026, 11, 10, 21, 0, 0, 0, time.UTC)
 	settle := 5 * time.Minute
 	for i := range 3 {
-		if err := takeGrant(now.Add(time.Duration(i)*time.Minute), settle, Need{Cores: 1, MemGB: 2}, "t"); err != nil {
+		if err := takeGrant(now.Add(time.Duration(i)*time.Minute), settle, grant{Need: Need{Cores: 1, MemGB: 2}, Label: "t"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if n := pendingNeed(now.Add(3*time.Minute), settle); n.Cores != 3 || n.MemGB != 6 {
+	if n := pendingNeed(now.Add(3*time.Minute), settle, nil); n.Cores != 3 || n.MemGB != 6 {
 		t.Fatalf("pending %+v, want 3 processors and 6 GB", n)
 	}
-	if n := pendingNeed(now.Add(6*time.Minute+time.Second), settle); n.Cores != 1 {
+	if n := pendingNeed(now.Add(6*time.Minute+time.Second), settle, nil); n.Cores != 1 {
 		t.Fatalf("pending %+v, want only the newest grant", n)
 	}
-	if n := pendingNeed(now.Add(time.Hour), settle); n.Cores != 0 {
+	if n := pendingNeed(now.Add(time.Hour), settle, nil); n.Cores != 0 {
 		t.Fatalf("pending %+v, want none", n)
 	}
 }
@@ -180,5 +180,165 @@ func TestALinuxHostIsJudgedByProcessorsInUseNotItsLoadAverage(t *testing.T) {
 	b, total, ok := parseProcStat("cpu  100 0 50 800 50 0 0 0 30 0\ncpu0 1 2 3 4\n")
 	if !ok || b != 150 || total != 1000 {
 		t.Fatalf("/proc/stat read as %.0f busy of %.0f (ok %v), want 150 of 1000: idle and waiting on a disk are not busy", b, total, ok)
+	}
+}
+
+// thread is one open thread as the meter reports it.
+func thread(repo string, now, expect, swing float64) LiveWork {
+	return LiveWork{Kind: "thread", Repo: repo, Now: now, Expect: expect, Swing: swing, MemGB: 1, ExpectMemGB: 1}
+}
+
+func TestOpenWorkCountsAsWhatItIsExpectedToUseNotWhatItUsesThisMinute(t *testing.T) {
+	s := defaultSettings()
+	// Six Owl threads between builds: 2 processors in use this minute and the last ten, where a
+	// count by what is in use would let six more in. Each was measured at 2.2 give or take 1.
+	quiet := pc(2, 2, 40, 60, "active")
+	for range 6 {
+		quiet.Work = append(quiet.Work, thread("owl-go", 0.2, 2.2, 1))
+	}
+	v := decide(quiet, s, Ask{}, Need{})
+	// 0.8 of the 2 in use is no thread's; 13.2 expected; the six swing together by sqrt(6) = 2.4.
+	if !near(v.Open.Rest, 0.8) || !near(v.Open.Expect, 13.2) || !near(v.Open.Swing, 2.45) || !near(v.CPU.Used, 16.45) || v.OK {
+		t.Fatalf("six quiet threads expected to build: used %.2f, open %+v: %s", v.CPU.Used, v.Open, v.Reason)
+	}
+	if !strings.Contains(v.Reason, "the work open here is expected to use 14.4 more than it does now") ||
+		!strings.Contains(v.Reason, "The 6 pieces of work open here use 1.2 this minute and are expected to use 13.2, give or take 2.5") {
+		t.Fatalf("the refusal does not say what the open work counts as: %s", v.Reason)
+	}
+	// The same six threads measured as waiting on their models leave the room they really leave.
+	for i := range quiet.Work {
+		quiet.Work[i] = thread("appforgutters", 0.2, 0.3, 0.2)
+	}
+	if v := decide(quiet, s, Ask{}, Need{}); !v.OK || !near(v.CPU.Used, 3.09) {
+		t.Fatalf("six threads on their models: used %.2f: %s", v.CPU.Used, v.Reason)
+	}
+	// What is in use is never counted as less than it is: threads busier than expected count as they are.
+	busy := pc(12, 9, 40, 60, "active")
+	busy.Work = []LiveWork{thread("owl-go", 11, 4, 1)}
+	if v := decide(busy, s, Ask{}, Need{}); !near(v.CPU.Used, 12) {
+		t.Fatalf("a thread busier than expected: used %.2f", v.CPU.Used)
+	}
+}
+
+func TestRoomIsKeptForTheSwingOfTheWorkTogetherNotForEveryPeak(t *testing.T) {
+	s := defaultSettings()
+	idle := pc(0, 0, 40, 60, "active")
+	steady := []level{{Name: "owl-go threads here", Minutes: 600, Cores: 4, MeanSq: 16, MemGB: 4}}
+	bursty := []level{{Name: "appforgutters threads here", Minutes: 600, Cores: 1, MeanSq: 10, MemGB: 2}}
+	// A steady thread needs its average; a thread that averages 1 in bursts of far more needs
+	// its average and its swing of 3.
+	if v := decide(idle, s, Ask{Learned: steady}, Need{}); v.CPU.Need < 3.9 || v.CPU.Need > 4.4 || v.Sized.Swing > 0.4 {
+		t.Fatalf("a steady thread: need %.2f, %+v", v.CPU.Need, v.Sized)
+	}
+	if v := decide(idle, s, Ask{Learned: bursty}, Need{}); !near(v.CPU.Need, 3.98) || !near(v.Sized.Cores, 1) || !near(v.Sized.Swing, 2.98) {
+		t.Fatalf("a bursty thread: need %.2f, %+v", v.CPU.Need, v.Sized)
+	}
+	// Ten bursty threads open do not all burst in one minute: together they count as 10 and a
+	// swing of 9.5, not as ten peaks, and an eleventh adds 1.4, not 4.
+	for range 10 {
+		idle.Work = append(idle.Work, thread("appforgutters", 0, 1, 3))
+	}
+	v := decide(idle, s, Ask{Learned: bursty}, Need{})
+	if !near(v.CPU.Used, 19.49) || v.CPU.Need < 1.4 || v.CPU.Need > 1.5 {
+		t.Fatalf("an eleventh bursty thread: used %.2f need %.2f", v.CPU.Used, v.CPU.Need)
+	}
+	// learn_margin 0 keeps no room for swing at all.
+	s.LearnMargin = 0
+	if v := decide(idle, s, Ask{Learned: bursty}, Need{}); !near(v.CPU.Used, 10) || !near(v.CPU.Need, 1) {
+		t.Fatalf("with no margin: used %.2f need %.2f", v.CPU.Used, v.CPU.Need)
+	}
+	// A run says so, and three of it count three times.
+	s = defaultSettings()
+	gate := []level{{Name: "`bun run gate` in appforgutters here", Minutes: 60, Cores: 5.2, MeanSq: 27.04, MemGB: 6, Seconds: 300, Own: true}}
+	v = decide(pc(13, 13, 40, 60, "active"), s, Ask{Kind: "run", Learned: gate}, Need{})
+	if v.OK || !strings.Contains(v.Reason, "has no room for this run") || !strings.Contains(v.Reason, "`bun run gate` in appforgutters here was measured at 5.2 processors and 6.0 GB over 60 minutes (a run lasts about 5 minutes)") {
+		t.Fatalf("a gate on a busy PC: %s", v.Reason)
+	}
+	// Three of it: three times its 4.6 and the swing of the three together (an hour of it is
+	// not yet all that is known, so each still swings 1.5), and three times its memory.
+	if v := decide(pc(1, 1, 40, 60, "active"), s, Ask{Kind: "run", Count: 3, Learned: gate}, Need{}); !near(v.CPU.Need, 16.35) || !near(v.Mem.Need, 3*5.43) {
+		t.Fatalf("three gates: %.2f processors, %.2f GB", v.CPU.Need, v.Mem.Need)
+	}
+}
+
+func TestAPieceOfWorkIsNeverCountedAsMoreThanTheMachine(t *testing.T) {
+	s := defaultSettings()
+	// A gate measured on the 24-processor PC, told to an 8-processor host with 16 GB.
+	host, err := linuxReading(linuxFiles{Loadavg: formatLoad(0.5), Meminfo: formatMem(16, 14)}, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcSays := []level{{Name: "`cargo test` in owl-go on pc", Minutes: 300, Cores: 17, MeanSq: 300, MemGB: 20}}
+	v := decide(host, s, Ask{Kind: "run", Learned: pcSays}, Need{})
+	if v.Sized.Cores != 8 || v.Sized.MemGB != 8 || v.CPU.Need > 8+1e-9 {
+		t.Fatalf("counted as %.1f processors and %.1f GB on a machine of 8 and 16", v.Sized.Cores, v.Sized.MemGB)
+	}
+}
+
+func TestWorkLetInCountsOnlyUntilItIsSeenRunning(t *testing.T) {
+	at := time.Date(2026, 11, 11, 18, 0, 0, 0, time.UTC)
+	grants := []grant{
+		{At: at, Need: Need{Cores: 4.5, MemGB: 6}, Repo: "Owl-Go"},
+		{At: at.Add(time.Minute), Need: Need{Cores: 2, MemGB: 4}, Repo: "appforgutters", Count: 2},
+		{At: at.Add(2 * time.Minute), Need: Need{Cores: 5.2}, Kind: "run", Repo: "appforgutters"},
+	}
+	open := func(kind, repo string, since time.Time) LiveWork {
+		return LiveWork{Kind: kind, Repo: repo, Since: since}
+	}
+	sum := func(work ...LiveWork) float64 {
+		total := 0.0
+		for _, g := range unmet(grants, work) {
+			total += g.Need.Cores
+		}
+		return total
+	}
+	if got := sum(); got != 11.7 {
+		t.Fatalf("nothing running yet: %.1f, want all 11.7", got)
+	}
+	// Threads that were open before the grants are not the threads that were let in.
+	if got := sum(open("thread", "owl-go", at.Add(-time.Hour)), open("thread", "appforgutters", at.Add(-time.Minute))); got != 11.7 {
+		t.Fatalf("older threads answered for new grants: %.1f", got)
+	}
+	// The Owl thread shows up: its grant ends, and it counts as itself from here.
+	if got := sum(open("thread", "owl-go", at.Add(20*time.Second))); !near(got, 7.2) {
+		t.Fatalf("after the Owl thread started: %.1f, want 7.2", got)
+	}
+	// One of the two AppForGutters threads shows up: half of their grant is left. A thread does
+	// not answer for a run, nor a thread of another repo for this one.
+	if got := sum(open("thread", "appforgutters", at.Add(90*time.Second)), open("thread", "fairshare", at.Add(3*time.Minute))); !near(got, 4.5+1+5.2) {
+		t.Fatalf("one of two arrived: %.1f, want 10.7", got)
+	}
+	// One piece of work does not answer for two grants.
+	both := []grant{{At: at, Need: Need{Cores: 1}}, {At: at, Need: Need{Cores: 1}}}
+	if left := unmet(both, []LiveWork{open("thread", "anything", at.Add(time.Second))}); len(left) != 1 {
+		t.Fatalf("one thread answered for %d of two grants", 2-len(left))
+	}
+	// The run starts: all three are running, nothing is pending.
+	if got := sum(open("thread", "owl-go", at.Add(20*time.Second)), open("thread", "appforgutters", at.Add(90*time.Second)),
+		open("thread", "appforgutters", at.Add(100*time.Second)), open("run", "appforgutters", at.Add(121*time.Second))); got != 0 {
+		t.Fatalf("everything running: %.1f still pending", got)
+	}
+}
+
+func TestMemoryIsKeptForWhatOpenWorkIsExpectedToReach(t *testing.T) {
+	s := defaultSettings()
+	// A 16 GB host with 9 GB free and three threads that hold 0.3 GB now; their gates take 3.
+	host, err := linuxReading(linuxFiles{Loadavg: formatLoad(0.5), Meminfo: formatMem(16, 9)}, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		host.Work = append(host.Work, LiveWork{Kind: "thread", Repo: "appforgutters", Expect: 0.5, MemGB: 0.3, ExpectMemGB: 3})
+	}
+	v := decide(host, s, Ask{}, Need{})
+	if !near(v.Mem.Pending, 8.1) || v.Mem.OK || !strings.Contains(v.Reason, "on top of 8.1 GB that work let in or open here is still expected to take") {
+		t.Fatalf("memory pending %.1f, ok %v: %s", v.Mem.Pending, v.Mem.OK, v.Reason)
+	}
+	// Threads that already hold what they are expected to reach owe nothing more.
+	for i := range host.Work {
+		host.Work[i].MemGB = 3
+	}
+	if v := decide(host, s, Ask{}, Need{}); v.Mem.Pending != 0 || !v.Mem.OK {
+		t.Fatalf("threads at their expected memory: pending %.1f, ok %v", v.Mem.Pending, v.Mem.OK)
 	}
 }
