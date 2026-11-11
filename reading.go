@@ -86,8 +86,16 @@ type Reading struct {
 	Work     []LiveWork `json:"work,omitempty"`
 	Programs []Program  `json:"programs,omitempty"`
 	// Others are the busiest programs that are not low-priority work: the user's own apps and
-	// Windows itself.
-	Others []Program `json:"others,omitempty"`
+	// Windows itself. OtherCores is what all of them together used over the short window. It is
+	// part of the processors in use above, on whichever side each ran: no separate count.
+	Others     []Program `json:"others,omitempty"`
+	OtherCores float64   `json:"other_cores"`
+	// FrameMs is how long Windows' window manager usually took to draw a frame of the desktop
+	// over the short window, and FrameWorstMs the slowest one: about one refresh of the screen
+	// when the desktop is well, seconds when something stalls it. 0 when not measured (nobody at
+	// the PC, or a machine with no screen).
+	FrameMs      float64 `json:"frame_ms,omitempty"`
+	FrameWorstMs float64 `json:"frame_worst_ms,omitempty"`
 	// Notes name anything the reading could not measure.
 	Notes []string `json:"notes,omitempty"`
 }
@@ -105,6 +113,14 @@ type sample struct {
 	workCores  float64
 	programs   map[string]float64 // CPU-seconds by program, low-priority work only
 	others     map[string]float64 // and of everything else
+	// otherCores is the processors everything else used, when the look measured it (hasOthers):
+	// a look read back from history written before 2026-11-11 did not.
+	otherCores float64
+	hasOthers  bool
+	// frameMs is how long a frame of the desktop usually took in the look, frameWorst the slowest
+	// and frames how many were timed.
+	frameMs, frameWorst float64
+	frames              int
 }
 
 // fullShare is the share of the processors work may use that must be in use, over a look, for
@@ -160,8 +176,50 @@ func (w *window) seed(lines []historyLineRead, now time.Time, long time.Duration
 		if l.Firm != nil {
 			firm = *l.Firm
 		}
-		w.samples = append(w.samples, sample{at: l.At, seconds: 60, busy: l.Busy, waiting: l.Waiting, userBusy: l.UserBusy, memAvailGB: l.MemAvailGB, firm: firm})
+		sm := sample{at: l.At, seconds: 60, busy: l.Busy, waiting: l.Waiting, userBusy: l.UserBusy, memAvailGB: l.MemAvailGB, firm: firm}
+		if l.Others != nil {
+			sm.otherCores, sm.hasOthers = *l.Others, true
+		}
+		w.samples = append(w.samples, sm)
 	}
+}
+
+// frameTimes is how long a frame of the desktop took over the looks no older than d: usually
+// (the looks' medians, each weighted by the frames it timed) and at the slowest.
+func (w *window) frameTimes(now time.Time, d time.Duration) (usual, worst float64) {
+	var sum float64
+	n := 0
+	cut := now.Add(-d)
+	for _, s := range w.samples {
+		if !s.at.After(cut) || s.frames == 0 {
+			continue
+		}
+		sum += s.frameMs * float64(s.frames)
+		n += s.frames
+		worst = math.Max(worst, s.frameWorst)
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return math.Round(sum / float64(n)), math.Round(worst)
+}
+
+// othersMean is what everything that is not agent work used over the looks no older than d that
+// measured it, each weighted by the time it covers.
+func (w *window) othersMean(now time.Time, d time.Duration) float64 {
+	var cores, seconds float64
+	cut := now.Add(-d)
+	for _, s := range w.samples {
+		if !s.at.After(cut) || s.seconds <= 0 || !s.hasOthers {
+			continue
+		}
+		cores += s.otherCores * s.seconds
+		seconds += s.seconds
+	}
+	if seconds == 0 {
+		return 0
+	}
+	return cores / seconds
 }
 
 // means averages the looks no older than d, each weighted by the time it covers.

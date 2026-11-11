@@ -5,7 +5,9 @@
 import json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timezone
 
-exe = sys.argv[1]
+# The whole path: a bare name is looked for on PATH, where the installed fairshare is, and a
+# check of the build must never be a check of what is installed.
+exe = os.path.abspath(sys.argv[1])
 home = tempfile.mkdtemp(prefix="fs-queue-")
 env = dict(os.environ, FAIRSHARE_HOME=home, FAIRSHARE_READING=os.path.join(home, "reading.json"), FAIRSHARE_METER="off")
 env.pop("FAIRSHARE_RESERVE", None)
@@ -141,12 +143,18 @@ code, out = fs("room", "--threads", "4", "--take", "--repo", "owl-go", "--label"
 check("an ordinary launch is refused while the gates fill the PC, counted as an Owl thread", code == 1 and "no room" in out
       and "owl-go threads here were measured at 5.0 processors" in out.lower(), out)
 code, out = fs("room", "--threads", "4", "--take", "--repo", "appforgutters", "--label", "AppForGutters production fix: uploads failing")
-check("a production fix gets room, counted as what its repo's threads were measured using", code == 0 and "held at idle priority" in out
+check("a production fix gets room, counted as what its repo's threads were measured using", code == 0
       and "appforgutters threads here were measured at 0.9" in out and "production" in out, out)
-hold = json.load(open(os.path.join(home, "urgent.json")))
-said = open(told_owl).read() if os.path.exists(told_owl) else ""
 if os.name == "nt":
+    check("and the answer says the other agent work is held at idle priority", "held at idle priority" in out and "degraded" not in out, out)
+    hold = json.load(open(os.path.join(home, "urgent.json")))
+    said = open(told_owl).read() if os.path.exists(told_owl) else ""
     check("Owl is told to hold older sessions at idle, for three minutes", "agents set yield_before %d --for 3m --real-home" % int(datetime.fromisoformat(hold["since"].replace("Z", "+00:00")).timestamp()) in said, said)
+else:
+    # This reading says Windows, but the program asked is the Linux one, and nothing holds agent
+    # work back there: a hold that nothing keeps is not said and not recorded.
+    check("where nothing can hold the other work back, the answer says so and no hold is recorded", "degraded: Owl was not told" in out
+          and "held at idle priority" not in out and not os.path.exists(os.path.join(home, "urgent.json")), out)
 decided = [json.loads(l) for l in open(os.path.join(home, "decisions.jsonl")) if l.strip()]
 check("the decision is recorded as urgent", decided[-1].get("urgent") is True and decided[-1].get("repo") == "appforgutters", str(decided[-1]))
 reading(19, firm=18.5)

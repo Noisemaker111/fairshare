@@ -4,9 +4,137 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// ownCPU is the processor-seconds this process has used.
+func ownCPU() float64 {
+	h, _ := syscall.GetCurrentProcess()
+	var began, end, kernel, user syscall.Filetime
+	syscall.GetProcessTimes(h, &began, &end, &kernel, &user)
+	return float64(ftime(kernel)+ftime(user)) / 1e7
+}
+
+// A process that burns half a processor-second and ends, between two looks: the meter kept a
+// handle on it from the look that saw it, so what it used after that look is still read.
+func TestWhatAProcessUsedAfterTheLastLookIsReadOnceItHasEnded(t *testing.T) {
+	if os.Getenv("FAIRSHARE_TEST_BURN") != "" {
+		for ownCPU() < 0.6 {
+		}
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWhatAProcessUsedAfterTheLastLookIsReadOnceItHasEnded$")
+	cmd.Env = append(os.Environ(), "FAIRSHARE_TEST_BURN=1")
+	began := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := uint32(cmd.Process.Pid)
+	var m meter
+	var seen *procLook
+	for end := time.Now().Add(10 * time.Second); seen == nil && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		procs, err := processes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range procs {
+			if p.pid == pid {
+				seen = &p
+			}
+			if p.pid != 0 {
+				m.keep(p)
+			}
+		}
+	}
+	if seen == nil {
+		t.Fatal("the process was never in a look")
+	}
+	if seen.cpu >= 0.55 {
+		t.Skipf("the look caught the process with %.2f of its 0.6 processor-seconds used: nothing left to read", seen.cpu)
+	}
+	cmd.Wait()
+	procs, err := processes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alive := map[procKey]float64{}
+	for _, p := range procs {
+		alive[procKey{p.pid, p.created}] = p.cpu
+	}
+	var got *endedProc
+	for _, e := range m.ended(alive) {
+		if e.seen.pid == pid {
+			got = &e
+		}
+	}
+	if got == nil {
+		t.Fatalf("the process ended with %.2f processor-seconds seen and nothing was read of the rest", seen.cpu)
+	}
+	if total := seen.cpu + got.used; total < 0.6 || total > 1.5 {
+		t.Fatalf("seen %.2f and read %.2f after it ended: %.2f processor-seconds, want the 0.6 it burned", seen.cpu, got.used, total)
+	}
+	if got.at.Before(began) || got.at.After(time.Now().Add(time.Second)) {
+		t.Fatalf("it ended at %v, outside this test (%v to now)", got.at, began)
+	}
+	if _, still := m.held[procKey{pid, seen.created}]; still {
+		t.Fatal("the meter still holds a process that ended")
+	}
+	if again := m.ended(alive); len(again) != 0 {
+		t.Fatalf("a process that ended was counted twice: %+v", again)
+	}
+}
+
+// Owl answers a setting it does not have with exit 0 and an error in its JSON. On 2026-11-11
+// that was read as told, and an urgent hold stood for 45 minutes with nothing held.
+func TestOwlRefusingASettingIsNotOwlTold(t *testing.T) {
+	t.Setenv("FAIRSHARE_HOME", t.TempDir())
+	t.Setenv("FAIRSHARE_RESERVE", "")
+	dir := t.TempDir()
+	refuses, takes := filepath.Join(dir, "refuses.cmd"), filepath.Join(dir, "takes.cmd")
+	os.WriteFile(refuses, []byte("@echo {\"error\":\"yield_before is not a setting; the keys are enabled, reserve_processors\",\"usage\":true}\r\n"), 0o755)
+	os.WriteFile(takes, []byte("@echo {\"key\":\"yield_before\",\"value\":\"1794421362\"}\r\n"), 0o755)
+	err := tellYield(Settings{OwlPath: refuses}, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "Owl refused: yield_before is not a setting") {
+		t.Fatalf("an Owl that refused the hold was read as told: %v", err)
+	}
+	if err := tellYield(Settings{OwlPath: takes}, time.Now()); err != nil {
+		t.Fatalf("an Owl that took the hold was read as refusing: %v", err)
+	}
+	if err := applyReserve(Settings{OwlPath: refuses}, 2); err == nil {
+		t.Fatal("an Owl that refused the reserve was read as told")
+	}
+}
+
+func TestFramesAreTheUsualOneAndTheSlowest(t *testing.T) {
+	now := time.Now()
+	f := frameWatch{ms: []float64{20, 23, 21, 1900, 22}}
+	if usual, worst, n := f.take(now); usual != 22 || worst != 1900 || n != 5 {
+		t.Fatalf("usual %.0f worst %.0f of %d, want 22, 1900 of 5", usual, worst, n)
+	}
+	if _, _, n := f.take(now); n != 0 {
+		t.Fatalf("frames were counted twice: %d", n)
+	}
+	// A frame that has been awaited for three seconds is a three-second frame already.
+	f = frameWatch{ms: []float64{20}, began: now.Add(-3 * time.Second)}
+	if _, worst, _ := f.take(now); worst != 3000 {
+		t.Fatalf("a frame awaited for 3 s counts as %.0f ms", worst)
+	}
+	var w window
+	w.add(sample{at: now.Add(-50 * time.Second), seconds: 5, frameMs: 20, frameWorst: 40, frames: 20}, longWindow)
+	w.add(sample{at: now.Add(-45 * time.Second), seconds: 5, frameMs: 30, frameWorst: 1900, frames: 5}, longWindow)
+	w.add(sample{at: now.Add(-40 * time.Second), seconds: 5}, longWindow) // nobody at the PC: not timed
+	if usual, worst := w.frameTimes(now, shortWindow); usual != 22 || worst != 1900 {
+		t.Fatalf("over the minute: usual %.0f worst %.0f, want 22 and 1900", usual, worst)
+	}
+	if usual, worst := w.frameTimes(now, 30*time.Second); usual != 0 || worst != 0 {
+		t.Fatalf("with no frame timed: %.0f %.0f", usual, worst)
+	}
+}
 
 // A real look at this PC, with the reserve worked out and not applied: a test never changes what
 // Owl holds on the machine it runs on.

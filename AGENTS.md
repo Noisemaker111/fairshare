@@ -32,8 +32,14 @@ meter's; with it set no meter is started.
 What is learned is checked end to end by `python -I scripts/learn-e2e.py fairshare.exe` (or
 `fairshare-linux`): a real meter in a private home, processes that burn real processors, a real
 run through the pool and, on Linux, a thread whose job detaches from it. Nothing in it is written
-by hand, so it takes about a minute and wants a machine with two processors to spare.
+by hand. Every number is held against what the burning processes themselves say they used, never
+against what an idle machine would give them, so it means the same on a full PC; there a run
+waits up to three minutes for room, and otherwise it takes about a minute.
 `LEARN_E2E_BREAK=1` keeps the meter from starting, to see the checks fail.
+
+Every script takes the program by its whole path (`os.path.abspath`): a bare name is looked for
+on PATH, where the installed fairshare is, and a check of the build must never be a check of
+what is installed.
 
 To see it live: `fairshare status`, then the launch hook the way T3 runs it,
 `echo '<a t3_thread_launch payload>' | python -I ~/.claude/hooks/thread-cap.py`. To see it fail:
@@ -67,6 +73,10 @@ old counts; `fairshare install` puts it back.
   hold stands (`urgent.go`), `owl agents unset yield_before` when it ends. The hook passes `--repo`
   (the project's folder name) so a launch counts as what that repo's threads were measured using
   (`learn.go`). A caller that passes `--cores` or `--threads` loses nothing by dropping them.
+  The hold needs an Owl that has `yield_before` (owl-go #1161); one that does not is answered
+  `degraded:` and nothing is recorded as held.
+- A gate that opens windows on the screen, moves the pointer or captures it (Owl's desktop
+  tests) runs as `fairshare pool run --needs desktop --wait <minutes> -- <command>`.
 
 ## Rules
 
@@ -97,9 +107,30 @@ old counts; `fairshare install` puts it back.
 - A machine that costs plan-hours is woken only when no awake machine has room, and never when
   its hours cannot be read.
 - When it cannot tell, it exits 2 with `degraded: <cause>`. It never answers from a stale reading.
+- Owl told is Owl having taken it. Owl answers a setting it does not have with an error in its
+  JSON and exit 0, so `owlAgents` reads the answer, and nothing is recorded as held or kept that
+  Owl refused.
+- Room is processors, memory, disk, and for work that says it drives the desktop, the desktop
+  (`desktopFree` in `room.go`): nobody at the PC, one piece at a time. A lag is never answered by
+  keeping more processors before `fairshare status` shows what the screen's frames take; on
+  2026-11-11 the reserve was not the cause and 8 kept changed nothing.
+- What a process used is read, not guessed, for every process a look ever saw. The one estimate
+  is `creditUnseen` (`work.go`); a change that adds a second one must say why it cannot be read.
 - Windows calls go through `syscall`, never `golang.org/x/sys/windows`, which imports `net`.
 
 ## Land
 
-Land through a pull request to `main` on GitHub (`origin`) after the test line passes, then run
-`fairshare install` from the merged build and `boat-host.sh up` for each host that is running.
+What is merged is what was already checked on the machines it runs on, so merging is never a
+different event from the check (Jon, 2026-11-11):
+
+1. On the branch, with everything committed: the test line, then the three end-to-end scripts.
+2. On this PC: `./fairshare.exe install` from that build. The PC's own meter is now the build
+   under check: `fairshare status` and `fairshare learned` answer with real numbers, and the
+   launch hook still gets its answer.
+3. On each boat host that is running: copy that build's `fairshare-linux` there and run the three
+   scripts on the host (`boat scp`, then `python3 -I /tmp/learn-e2e.py /tmp/fairshare-branch`),
+   then `boat-host.sh --conf <folder> up`, which installs what `fairshare install` put in
+   `%LOCALAPPDATA%\fairshare\bin`. A stopped host gets it at its next `up`.
+4. Only then merge the pull request to `main` on GitHub (`origin`), and check that
+   `git rev-parse origin/main^{tree}` is the tree that was installed. If `main` moved and the
+   tree differs, that tree is the new build and goes through 1 to 3 before anything else.

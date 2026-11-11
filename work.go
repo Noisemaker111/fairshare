@@ -41,6 +41,47 @@ type procNode struct {
 	// total is the processor-seconds it has used since it began (on Linux its ended children's
 	// too).
 	total float64
+	// fresh says this is the first look that saw it: it began since the look before, so cores is
+	// all it has used. gone says it ended since the look before: cores is what it used after that
+	// look, read from the handle the meter kept on it, and ended is when it ended.
+	fresh, gone bool
+	ended       time.Time
+}
+
+// creditUnseen shares out the processor-seconds of a look that no process accounts for: what
+// processes that began and ended between two looks used. Nobody saw them, and Windows keeps no
+// record of whose they were. They were started by the work that starts short processes, which is
+// the work whose processes were seen beginning or ending in this look, so each agent process
+// that began or ended in the look takes an equal share: a piece of work is credited by how many
+// of its processes came and went, not by how much it used, or one long steady process would be
+// given the compiler jobs of the thread beside it. It returns what was shared out: nothing when
+// no agent process began or ended, since then there is nobody to say whose it was, and that time
+// stays in the machine's total and in no piece of work.
+//
+// It is an estimate, and the only one here: what a process that was seen at any look used is
+// read exactly, to its last second (the handle the meter keeps on it).
+//
+// Why: measured on Jon's PC on 2026-11-11 with a look every 5 s, 68 to 73% of the processor time
+// in use was in processes alive at a look, 3 to 4% was the last seconds of processes that had
+// just ended, and 23 to 29% was used by processes no look ever saw: compiler jobs, test binaries,
+// git. Looking four times a second still missed 13% and cost 4% of a processor. A thread's gate
+// was learned about a third smaller than it is.
+func creditUnseen(nodes []procNode, unseen float64) float64 {
+	n := 0
+	for _, p := range nodes {
+		if p.work && (p.fresh || p.gone) {
+			n++
+		}
+	}
+	if unseen <= 0 || n == 0 {
+		return 0
+	}
+	for i := range nodes {
+		if nodes[i].work && (nodes[i].fresh || nodes[i].gone) {
+			nodes[i].cores += unseen / float64(n)
+		}
+	}
+	return unseen
 }
 
 type procKey struct {
@@ -71,6 +112,8 @@ type LiveWork struct {
 	MemGB       float64 `json:"mem_gb"`
 	ExpectMemGB float64 `json:"expect_mem_gb"`
 	Processes   int     `json:"processes"`
+	// Desktop says it drives the desktop (room.go, desktopFree).
+	Desktop bool `json:"desktop,omitempty"`
 }
 
 // runMark is what a run leaves in fairshare's home while it runs, so the meter knows the process
@@ -82,6 +125,9 @@ type runMark struct {
 	Label string    `json:"label,omitempty"`
 	At    time.Time `json:"at"`
 	Need  Need      `json:"need"`
+	// Desktop says the run drives the desktop: it opens windows on it, moves the pointer or
+	// captures the screen.
+	Desktop bool `json:"desktop,omitempty"`
 }
 
 func marksDir() string { return filepath.Join(homeDir(), "marks") }
@@ -192,6 +238,8 @@ type unit struct {
 	kind, repo, what string
 	// dir is a thread's folder, tree its worktree's name, thread its T3 thread.
 	dir, tree, thread string
+	// desktop says it is a run that drives the desktop.
+	desktop bool
 	// root is the process a thread or a run hangs under: its runner, or the run's fairshare.
 	root  procKey
 	since time.Time
@@ -207,6 +255,11 @@ type unit struct {
 	// fresh says this is the look that found it; total adds up what its processes used so far.
 	fresh bool
 	total float64
+	// lastEnd is when the last of its processes that ended in this look ended, and anyEnd whether
+	// one did: a piece of work whose every process ended since the look before still ran for the
+	// part of this look before that.
+	lastEnd time.Time
+	anyEnd  bool
 }
 
 // tracker follows every piece of work from look to look.
@@ -317,6 +370,14 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 	for i, n := range nodes {
 		own[i] = unknown
 		k := procKey{n.pid, n.created}
+		if n.gone {
+			// It ended since the look before: its last seconds are its work's, and it starts none.
+			own[i] = 0
+			if id := t.owner[k]; id > 0 && t.units[id] != nil {
+				own[i] = id
+			}
+			continue
+		}
 		m, marked := markOf[n.pid]
 		marked = marked && strings.HasPrefix(strings.ToLower(n.name), "fairshare")
 		if id, known := t.owner[k]; known {
@@ -331,7 +392,7 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 			}
 		}
 		if marked {
-			own[i] = t.open(unit{kind: "run", repo: strings.ToLower(strings.TrimSpace(m.Repo)), what: m.What, root: k, since: began(n)})
+			own[i] = t.open(unit{kind: "run", repo: strings.ToLower(strings.TrimSpace(m.Repo)), what: m.What, root: k, since: began(n), desktop: m.Desktop})
 			t.owner[k] = own[i]
 		} else if isRunner(n.name, s.Runners) {
 			dir, thread := "", ""
@@ -356,7 +417,7 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 			late = late[1:]
 			for _, i := range kids[nodes[at].pid] {
 				k := procKey{nodes[i].pid, nodes[i].created}
-				if id := t.owner[k]; i == at || nodes[i].created < nodes[at].created || (id > 0 && t.units[id] != nil && t.units[id].root == k) {
+				if id := t.owner[k]; i == at || nodes[i].gone || nodes[i].created < nodes[at].created || (id > 0 && t.units[id] != nil && t.units[id].root == k) {
 					continue // not its child, or a piece of work of its own
 				}
 				delete(t.owner, k)
@@ -394,12 +455,26 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 	}
 	used := map[int]float64{}
 	for _, u := range t.units {
-		u.mem, u.procs = 0, 0
+		u.mem, u.procs, u.anyEnd, u.lastEnd = 0, 0, false, time.Time{}
 	}
 	present := make(map[procKey]int, len(nodes))
 	for i, n := range nodes {
 		id := resolve(i, 0)
 		k := procKey{n.pid, n.created}
+		if n.gone {
+			// What it used after the last look that saw it; it holds no memory and is no process
+			// of the work any more, and is forgotten after this look.
+			if id > 0 {
+				u := t.units[id]
+				u.cpu += n.cores
+				used[id] += n.cores
+				u.anyEnd = true
+				if n.ended.After(u.lastEnd) {
+					u.lastEnd = n.ended
+				}
+			}
+			continue
+		}
 		if v, ok := t.owner[k]; ok {
 			present[k] = v
 		}
@@ -444,6 +519,14 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 			for len(u.recent) > 1 && now.Sub(u.recent[0].at) >= time.Minute {
 				u.recent = u.recent[1:]
 			}
+		} else if u.anyEnd {
+			// Its last process ended since the look before: it ran until then, not to this look.
+			ran := seconds
+			if before := now.Add(-time.Duration(seconds * float64(time.Second))); !u.lastEnd.IsZero() {
+				ran = math.Max(0, math.Min(seconds, u.lastEnd.Sub(before).Seconds()))
+			}
+			u.seconds += ran
+			u.lived += ran
 		}
 		ended := u.procs == 0
 		if !ended && !minute {
@@ -488,7 +571,7 @@ func (t *tracker) live(now time.Time, l learned, s Settings) []LiveWork {
 		if u.n > 0 {
 			mean, meanSq = u.sum/u.n, u.sq/u.n
 		}
-		lw := LiveWork{Kind: u.kind, Repo: u.repo, What: u.what, Since: u.since.UTC(), Cores: round2(mean), Minutes: round2(u.n), MemGB: round2(u.mem), Processes: u.procs}
+		lw := LiveWork{Kind: u.kind, Repo: u.repo, What: u.what, Since: u.since.UTC(), Cores: round2(mean), Minutes: round2(u.n), MemGB: round2(u.mem), Processes: u.procs, Desktop: u.desktop}
 		lw.Expect = w*mean + (1-w)*prior.Cores
 		lw.Swing = round2(spread(lw.Expect, w*meanSq+(1-w)*(prior.Swing*prior.Swing+prior.Cores*prior.Cores)))
 		lw.Expect = round2(lw.Expect)
@@ -530,7 +613,7 @@ func learn(learnt []stretch, now time.Time, s Settings) learned {
 func liveFromMarks(marks []runMark) []LiveWork {
 	var out []LiveWork
 	for _, m := range marks {
-		out = append(out, LiveWork{Kind: "run", Repo: strings.ToLower(m.Repo), What: m.What, Since: m.At.UTC(), Expect: m.Need.Cores, ExpectMemGB: m.Need.MemGB, Processes: 1})
+		out = append(out, LiveWork{Kind: "run", Repo: strings.ToLower(m.Repo), What: m.What, Since: m.At.UTC(), Expect: m.Need.Cores, ExpectMemGB: m.Need.MemGB, Processes: 1, Desktop: m.Desktop})
 	}
 	return out
 }
@@ -555,6 +638,9 @@ func workWords(w LiveWork) string {
 	}
 	switch w.Kind {
 	case "run":
+		if w.Desktop {
+			return fmt.Sprintf("run driving the desktop in %s: %s", name, w.What)
+		}
 		return fmt.Sprintf("run in %s: %s", name, w.What)
 	case "job":
 		return fmt.Sprintf("job in %s (%s)", name, w.What)

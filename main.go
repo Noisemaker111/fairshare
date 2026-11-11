@@ -23,6 +23,8 @@ const usage = `fairshare: how much room this machine has for agent work, measure
                                    what the work is: a thread (the default), or a run of that command
       --urgent                     judge it against the work that would not step aside, and hold the rest back
                                    (a title holding one of urgent_words is urgent too)
+      --desktop                    the work drives the desktop (opens windows on it, moves the pointer, captures
+                                   the screen): room only while nobody is at the PC, one piece at a time
       --cores X --mem-gb X         the caller's guess: where the estimate starts until work like it is measured
       --disk-gb X                  count its checkout as this
       --seen '<json>'              what another machine of the pool measured for this work (the pool passes it)
@@ -190,6 +192,7 @@ func cmdRoom(args []string) int {
 	what := fs.String("what", "", "a run's command")
 	seenFlag := fs.String("seen", "", "what another machine of the pool measured for this work, as JSON")
 	urgentFlag := fs.Bool("urgent", false, "judge it against the work that would not step aside")
+	desktop := fs.Bool("desktop", false, "the work drives the desktop: room only while nobody is at the PC, one piece at a time")
 	fs.Parse(args)
 
 	fail := func(err error) int {
@@ -215,8 +218,8 @@ func cmdRoom(args []string) int {
 		}
 		seen = &got
 	}
-	ask := Ask{Threads: *threads, Count: *count, Explicit: Need{*cores, *memGB, *diskGB}, Disk: *checkout, Kind: *kind}
-	let := grant{Label: *label, Kind: *kind, Repo: *repo, Count: max(*count, 1)}
+	ask := Ask{Threads: *threads, Count: *count, Explicit: Need{*cores, *memGB, *diskGB}, Disk: *checkout, Kind: *kind, Desktop: *desktop}
+	let := grant{Label: *label, Kind: *kind, Repo: *repo, Count: max(*count, 1), Desktop: *desktop}
 	letIn := func(need Need) bool {
 		let.Need = need
 		return takeGrant(now, settle(s), let) == nil
@@ -235,6 +238,7 @@ func cmdRoom(args []string) int {
 		return fail(err)
 	}
 	ask.Learned = loadLearned().levels(*kind, *repo, *what, seen, now, s)
+	ask.DesktopTaken = *desktop && desktopPending(now, settle(s), r.Work)
 	// Only a machine where Owl holds agent work can put other work behind an urgent launch.
 	urgent = urgent && r.OS == "windows"
 	var body []byte
@@ -279,13 +283,19 @@ func cmdRoom(args []string) int {
 				return nil
 			}
 			took = letIn(Need{v.CPU.Need, v.Mem.Need, v.Disk.Need})
-			hold = hold.join(now, *label, standing)
-			if err := saveUrgent(hold); err != nil {
-				v.Reason += " degraded: the hold was not recorded: " + err.Error()
+			// A hold is only what Owl took: when it cannot be told, nothing steps aside, and
+			// nothing is recorded as if it did.
+			hold = hold.join(now, *label, *repo, standing)
+			if err := tellYield(s, hold.Since); err != nil {
+				// The answer said the other work is held; it is not.
+				if i, j := strings.Index(v.Reason, " The other agent work"), strings.Index(v.Reason, "stay yours."); i >= 0 && j > i {
+					v.Reason = v.Reason[:i] + v.Reason[j+len("stay yours."):]
+				}
+				v.Reason += " degraded: Owl was not told to hold the other work back, so it runs beside it: " + err.Error()
 				return nil
 			}
-			if err := tellYield(s, hold.Since); err != nil {
-				v.Reason += " degraded: Owl was not told to hold the other work back, so it runs beside it: " + err.Error()
+			if err := saveUrgent(hold); err != nil {
+				v.Reason += " degraded: the hold was not recorded: " + err.Error()
 			}
 			return nil
 		}
@@ -303,7 +313,9 @@ func cmdRoom(args []string) int {
 			}
 			return nil
 		}
-		if !*wait || *key == "" || *launcher == "" {
+		// Work that drives the desktop is not kept in the line: the line is offered room by
+		// processors, and this waits for the person to leave (`pool run --wait`).
+		if !*wait || *key == "" || *launcher == "" || *desktop {
 			return nil
 		}
 		q, _, _ = join(q, queued{Key: *key, Launcher: *launcher, Title: *label, Threads: *threads, Count: max(*count, 1), Checkout: *checkout,
@@ -402,7 +414,18 @@ func statusText(v Verdict, s Settings) string {
 		row("just let in", fmt.Sprintf("counted as %.1f processors until it is seen running", v.CPU.Pending))
 	}
 	if len(r.Others) > 0 {
-		row("everything else", programWords(r.Others, 5))
+		text := programWords(r.Others, 5)
+		if r.OtherCores > 0 {
+			text = fmt.Sprintf("%.1f of the processors in use above: %s", r.OtherCores, text)
+		}
+		row("everything else", text)
+	}
+	if r.FrameMs > 0 {
+		text := fmt.Sprintf("a frame takes %.0f ms, the slowest in the last %s %.0f ms", r.FrameMs, span(r.ShortSeconds), r.FrameWorstMs)
+		if r.FrameWorstMs >= 10*r.FrameMs {
+			text += ": it stalled, which is what work drawing on or capturing the screen does"
+		}
+		row("screen", text)
 	}
 	if r.Urgent != nil {
 		row("urgent first", fmt.Sprintf("since %s (%s): agent sessions older than that are held at idle priority, %.1f processors of it now; work that does not step aside uses %.1f",

@@ -197,6 +197,24 @@ code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
 check("a run with room on the PC runs in the PC's folder for the repo", code == 0 and out == os.path.realpath(pc_repo) and "pc takes it" in err, out + err)
 code, out, err = fs("pool", "run", "--repo", "demo", "--", py, "-c", "import sys; sys.exit(7)")
 check("the command's exit is the run's exit", code == 7 and "exit 7" in err, out + err)
+# Work that drives the desktop (opens windows on it, moves the pointer, captures the screen): only
+# on the machine that has one, only while nobody is at it, and one piece at a time.
+code, out, err = fs("pool", "run", "--repo", "demo", "--needs", "desktop", "--", *where)
+check("a run that drives the desktop does not start while someone is at the PC, and no Linux host takes it", code == 69 and out == ""
+      and "someone is at the PC" in err and "host-a is not open to it (has no desktop)" in err, out + err)
+reading("pc", 2, processors=24, reserved=4, state="away", system="windows")
+ask = "import subprocess, sys; r = subprocess.run([sys.argv[1], 'room', '--kind', 'run', '--desktop'], capture_output=True, text=True); print(r.returncode, r.stdout.strip())"
+code, out, err = fs("pool", "run", "--repo", "demo", "--needs", "desktop", "--", py, "-c", ask, exe)
+# The second is refused for the first either way: as work let in a moment ago (a reading that does
+# not list it yet, as here on Windows) or as the open run itself (Linux reads the run's mark).
+check("with nobody at the PC it runs there, and while it runs no second one may start", code == 0 and "pc takes it" in err
+      and out.startswith("1 ") and ("It drives the desktop, and work let in a moment ago is about to drive it" in out
+                                    or "It drives the desktop, and the run driving the desktop in demo" in out), out + err)
+code, out, err = fs("room", "--kind", "run", "--desktop")
+check("once it has ended the desktop is free again", code == 0, out + err)
+reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
+code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
+check("a run that does not drive the desktop is not held for it", code == 0 and "pc takes it" in err, out + err)
 reading("pc", 17.9, processors=24, reserved=4, state="active", system="windows")
 code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
 check("with the PC full the same run goes to the host, in the host's folder", code == 0 and out == os.path.realpath(host_repo) and "host-a takes it" in err, out + err)
@@ -214,7 +232,7 @@ code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
 check("a run with the whole pool full does not run, and says who is full", code == 69 and "No machine in the pool has room" in err and out == "", out + err)
 record = [json.loads(l) for l in lines(os.path.join(home["pc"], "decisions.jsonl"))]
 runs = [r for r in record if r.get("event") == "pool run"]
-check("every placement and run is on the record, with how long each took", len(runs) == 4 and runs[-1]["machine"] == "host-a" and runs[-1]["commit"] == first
+check("every placement and run is on the record, with how long each took", len(runs) == 6 and runs[-1]["machine"] == "host-a" and runs[-1]["commit"] == first
       and all("seconds" in r for r in record if r.get("event") == "pool place"), runs)
 
 # What work takes is learned, each machine's own, and the pool passes it on. host-a has run this

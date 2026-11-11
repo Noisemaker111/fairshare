@@ -13,11 +13,19 @@ package main
 //
 // fairshare decides and tells; Owl's keeper does the holding (its yield_before setting, told for
 // three minutes at a time and again every minute, so a meter that stops lets the hold run out).
+// A hold exists only once Owl has taken it: an Owl that refuses the setting holds nothing, so
+// nothing is recorded as held and the answer says degraded.
+//
+// Why: on 2026-11-11 the hold for a production deploy stood for 45 minutes and freed nothing. The
+// Owl on the PC did not have yield_before yet and answered `{"error": ...}` with exit 0, which
+// fairshare read as told; and any agent session started since the hold began kept it standing,
+// whoever's it was.
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -29,6 +37,25 @@ type urgentHold struct {
 	Since  time.Time `json:"since"`
 	Last   time.Time `json:"last"`
 	Labels []string  `json:"labels,omitempty"`
+	// Repos are the repos its urgent launches were for: the hold stands while their work runs.
+	Repos []string `json:"repos,omitempty"`
+}
+
+// runs says whether work an urgent launch of this hold started is still open: a thread or a run
+// in one of its repos that began since the hold did. A launch that named no repo has no work
+// that can be told from anyone else's, so its hold stands for its least minutes only.
+func (h urgentHold) runs(work []LiveWork) bool {
+	for _, w := range work {
+		if w.Repo == "" || w.Since.Before(h.Since) {
+			continue
+		}
+		for _, r := range h.Repos {
+			if strings.EqualFold(strings.TrimSpace(r), w.Repo) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func urgentFile() string { return filepath.Join(homeDir(), "urgent.json") }
@@ -81,7 +108,7 @@ func words(text string) string {
 }
 
 // live says whether a hold still stands: for urgent_least_minutes after its latest urgent launch
-// whatever happens, then while an agent session started since it began is still running, and
+// whatever happens, then while the work its urgent launches started is still running (runs), and
 // never past urgent_most_minutes after its latest urgent launch.
 func (h urgentHold) live(now time.Time, sessionSince bool, s Settings) bool {
 	if h.Since.IsZero() || !now.Before(h.Last.Add(minutes(s.UrgentMostMinutes))) {
@@ -92,11 +119,14 @@ func (h urgentHold) live(now time.Time, sessionSince bool, s Settings) bool {
 
 // join adds an urgent launch let in at now: a hold that stands keeps its start, so the urgent
 // sessions already let in under it never yield to the new one.
-func (h urgentHold) join(now time.Time, label string, standing bool) urgentHold {
+func (h urgentHold) join(now time.Time, label, repo string, standing bool) urgentHold {
 	if !standing {
 		h = urgentHold{Since: now}
 	}
 	h.Last = now
+	if repo = strings.ToLower(strings.TrimSpace(repo)); repo != "" && !slices.Contains(h.Repos, repo) {
+		h.Repos = append(h.Repos, repo)
+	}
 	if label != "" {
 		h.Labels = append(h.Labels, label)
 		if len(h.Labels) > 5 {
