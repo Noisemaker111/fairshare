@@ -1266,6 +1266,9 @@ func poolHere(word string) int {
 			}
 		}
 	}
+	if runtime.GOOS == "windows" {
+		e.Argv[0] = gitBash(e.Argv[0], os.Getenv("ProgramFiles"), func(path string) bool { _, err := os.Stat(path); return err == nil })
+	}
 	cmd := exec.Command(e.Argv[0], e.Argv[1:]...)
 	if e.Login && runtime.GOOS != "windows" {
 		cmd = exec.Command(loginShell(), append([]string{"-lc", `exec "$@"`, "fairshare"}, e.Argv...)...)
@@ -1273,6 +1276,22 @@ func poolHere(word string) int {
 	cmd.Dir = dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return exitCode(cmd.Run())
+}
+
+// gitBash is the program a bare `bash` means on Windows: Git Bash when it is installed, not the
+// WSL bash.exe in System32 that the name can find first. A gate is one bash line on every
+// machine, so the same run has to mean the same shell on the PC and on a Linux host.
+func gitBash(program, programFiles string, exists func(string) bool) string {
+	if !strings.EqualFold(program, "bash") && !strings.EqualFold(program, "bash.exe") {
+		return program
+	}
+	if programFiles == "" {
+		programFiles = `C:\Program Files`
+	}
+	if git := programFiles + `\Git\bin\bash.exe`; exists(git) {
+		return git
+	}
+	return program
 }
 
 // loginShell is the user's shell when it reads `exec "$@"` the way sh does, else sh.
