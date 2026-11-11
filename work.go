@@ -192,7 +192,9 @@ type unit struct {
 	kind, repo, what string
 	// dir is a thread's folder, tree its worktree's name, thread its T3 thread.
 	dir, tree, thread string
-	since             time.Time
+	// root is the process a thread or a run hangs under: its runner, or the run's fairshare.
+	root  procKey
+	since time.Time
 	// The stretch being measured: processor-seconds, seconds, and the most memory in it.
 	cpu, seconds, memPeak float64
 	// Its own minutes so far, the recent ones counting for more: minutes, the sum of minutes
@@ -310,16 +312,26 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 	}
 	const unknown = -1
 	own := make([]int, len(nodes))
+	var late []int
 	// The roots first, so that a process asked where it works finds its thread already there.
 	for i, n := range nodes {
 		own[i] = unknown
 		k := procKey{n.pid, n.created}
-		if id, ok := t.owner[k]; ok && id > 0 && t.units[id] != nil {
-			own[i] = id
-			continue
+		m, marked := markOf[n.pid]
+		marked = marked && strings.HasPrefix(strings.ToLower(n.name), "fairshare")
+		if id, known := t.owner[k]; known {
+			if id > 0 && t.units[id] != nil && (!marked || t.units[id].root == k) {
+				own[i] = id
+				continue
+			}
+			if marked {
+				// A look caught the run before it had left its mark, and put it and what it had
+				// started under whatever was above it. It is a run from here on, and so are they.
+				late = append(late, i)
+			}
 		}
-		if m, ok := markOf[n.pid]; ok && strings.HasPrefix(strings.ToLower(n.name), "fairshare") {
-			own[i] = t.open(unit{kind: "run", repo: strings.ToLower(strings.TrimSpace(m.Repo)), what: m.What, since: began(n)})
+		if marked {
+			own[i] = t.open(unit{kind: "run", repo: strings.ToLower(strings.TrimSpace(m.Repo)), what: m.What, root: k, since: began(n)})
 			t.owner[k] = own[i]
 		} else if isRunner(n.name, s.Runners) {
 			dir, thread := "", ""
@@ -330,8 +342,27 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 			if tree == "" {
 				tree = repoOf(dir)
 			}
-			own[i] = t.open(unit{kind: "thread", repo: repoOf(dir), what: tree, dir: normDir(dir), tree: tree, thread: thread, since: began(n)})
+			own[i] = t.open(unit{kind: "thread", repo: repoOf(dir), what: tree, dir: normDir(dir), tree: tree, thread: thread, root: k, since: began(n)})
 			t.owner[k] = own[i]
+		}
+	}
+	if len(late) > 0 {
+		kids := map[uint32][]int{}
+		for i, n := range nodes {
+			kids[n.parent] = append(kids[n.parent], i)
+		}
+		for len(late) > 0 {
+			at := late[0]
+			late = late[1:]
+			for _, i := range kids[nodes[at].pid] {
+				k := procKey{nodes[i].pid, nodes[i].created}
+				if id := t.owner[k]; i == at || nodes[i].created < nodes[at].created || (id > 0 && t.units[id] != nil && t.units[id].root == k) {
+					continue // not its child, or a piece of work of its own
+				}
+				delete(t.owner, k)
+				own[i] = unknown
+				late = append(late, i)
+			}
 		}
 	}
 	var resolve func(i, depth int) int
@@ -379,7 +410,9 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 		u.cpu += n.cores
 		u.mem += n.memGB
 		u.procs++
-		u.total += n.total
+		if u.fresh {
+			u.total += n.total
+		}
 		used[id] += n.cores
 	}
 	t.owner = present

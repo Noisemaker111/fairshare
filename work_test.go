@@ -147,6 +147,34 @@ func TestARunIsItsOwnWorkAndNotItsThreads(t *testing.T) {
 	}
 }
 
+func TestARunCaughtBeforeItLeftItsMarkIsStillARun(t *testing.T) {
+	l := newLooks()
+	l.where[200] = [2]string{"/home/user/.t3/worktrees/owl-go/port-engine", ""}
+	claude := procNode{pid: 200, parent: 100, created: 20, name: "claude"}
+	here := procNode{pid: 400, parent: 200, created: 40, name: "fairshare-linux"}
+	git := procNode{pid: 500, parent: 400, created: 50, name: "git", cores: 5}
+	// Reached over SSH, a run hangs under nothing; this look puts it under nobody, and its
+	// thread's own under the thread.
+	ssh := procNode{pid: 600, parent: 1, created: 60, name: "fairshare"}
+	bun := procNode{pid: 700, parent: 600, created: 70, name: "bun", cores: 5}
+	l.look(claude, here, git, ssh, bun)
+	if u := l.unit("thread", "owl-go"); u == nil || u.procs != 3 || len(l.t.units) != 1 {
+		t.Fatalf("before the marks: %+v of %d", u, len(l.t.units))
+	}
+	l.marks = []runMark{{PID: 400, Repo: "owl-go", What: "cargo test"}, {PID: 600, Repo: "appforgutters", What: "bun run gate"}}
+	// A runner started by the run is a thread of its own, and stays one.
+	inner := procNode{pid: 800, parent: 400, created: 80, name: "claude"}
+	l.look(claude, here, git, ssh, bun, inner)
+	l.look(claude, here, git, ssh, bun, inner)
+	local, far := l.unit("run", "owl-go"), l.unit("run", "appforgutters")
+	if local == nil || local.procs != 2 || far == nil || far.procs != 2 || len(l.t.units) != 4 {
+		t.Fatalf("after the marks: local %+v, far %+v, of %d", local, far, len(l.t.units))
+	}
+	if u := l.unit("thread", "owl-go"); u.procs != 1 || math.Abs(local.cpu-10) > 1e-9 || math.Abs(far.cpu-10) > 1e-9 {
+		t.Fatalf("the thread keeps %d processes; the runs used %.0f and %.0f since their marks, want 10 each", u.procs, local.cpu, far.cpu)
+	}
+}
+
 func TestOpenWorkIsExpectedToUseWhatItAndWorkLikeItWasMeasuredUsing(t *testing.T) {
 	l := newLooks()
 	known := learned{}

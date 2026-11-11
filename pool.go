@@ -1388,6 +1388,16 @@ func poolHere(word string) int {
 		fmt.Fprintln(os.Stderr, "degraded: the errand names nothing to run")
 		return cannotRun
 	}
+	if e.Mark != nil {
+		// Before anything slow (a checkout): the meter should find the mark with the process.
+		mark := *e.Mark
+		mark.PID, mark.At = uint32(os.Getpid()), time.Now().UTC()
+		defer leaveMark(mark)()
+		// The run was let in on a grant; once it has ended it no longer counts as still to come.
+		if s, err := loadSettings(); err == nil {
+			defer endGrant("run", mark.Repo, mark.At, settle(s))
+		}
+	}
 	if e.Commit != "" {
 		tree, err := checkout(dir, e.Commit)
 		if err != nil {
@@ -1403,15 +1413,6 @@ func poolHere(word string) int {
 			if os.WriteFile(mark, []byte(strconv.Itoa(os.Getpid())), 0o644) == nil {
 				defer os.Remove(mark)
 			}
-		}
-	}
-	if e.Mark != nil {
-		mark := *e.Mark
-		mark.PID, mark.At = uint32(os.Getpid()), time.Now().UTC()
-		defer leaveMark(mark)()
-		// The run was let in on a grant; once it has ended it no longer counts as still to come.
-		if s, err := loadSettings(); err == nil {
-			defer endGrant("run", mark.Repo, mark.At, settle(s))
 		}
 	}
 	if runtime.GOOS == "windows" {
