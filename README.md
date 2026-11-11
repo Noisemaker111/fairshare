@@ -1,296 +1,140 @@
 # fairshare
 
-Fairshare helps AI agent work yield to your apps on Windows. It manages the CPU priority of
-builds, tests and other work, shares CPU time between chats, and can reuse identical checks.
+fairshare says how much room a machine has for AI agent work, from what was measured on it, and
+keeps for the person at the PC exactly the processors their own programs are using. It replaces
+two fixed numbers: a cap on how many agent threads may be open, and a set count of processors
+kept for the user.
 
-## Install
-
-Requires Windows, Git and Go 1.26.5 or newer. In PowerShell:
-
-```powershell
-git clone https://github.com/Noisemaker111/fairshare.git
-cd fairshare
-go build -o fairshare.exe .
-.\fairshare.exe install
-```
-
-Installation copies the executable to `%LOCALAPPDATA%\fairshare\bin`, registers hooks for
-Claude Code and Codex, installs the OpenCode plugin, and creates a scheduled task to run
-`adopt`. It replaces existing agent-guard hooks and backs up files it changes as
-`<file>.fairshare.bak`. Run `.\fairshare.exe install --uninstall` to remove Fairshare's
-integration. See the commands below for monitoring and running individual jobs.
-
-Fairshare records commands and activity in `%LOCALAPPDATA%\fairshare\events.jsonl` on your PC.
-Review that file before sharing it.
+A count of threads is wrong in both directions. Seven threads waiting on their models use under
+two processors; five threads building Rust want every processor twice over. On 2026-11-10 a cap
+of seven let in seven threads that together wanted 36 of the 16 processors they could use, and
+on calmer nights the same cap refused an eighth thread on an idle PC.
 
 ## What it does
 
-- **Yields to the foreground.** Every process of a piece of agent work goes into a Windows job at
-  idle CPU priority, very low disk priority and very low memory priority. Windows enforces the CPU
-  class on the whole process tree, so a child can't raise itself back. Your game and apps get
-  priority while agent work uses available capacity.
-- **Never leaves anything behind.** `run` puts the tree in a job Windows kills when fairshare
-  exits, however it exits. When a chat's own process exits, `adopt` ends everything left in that
-  chat's lane, including a helper whose parent died long before (Windows never ends a child with
-  its parent: on 2026-11-07, 75 Convex executor `node.exe` were still running, up to 94 hours old,
-  their backends long gone).
-- **Never suspends anything unless asked to.** A suspended chat looks hung, so by default agent
-  work is only lowered in priority. With `--freeze` (`run` or `adopt`), when free RAM or free
-  commit falls below 6 GB, the youngest agent work on the PC freezes, one piece at a time; once
-  it's back above 7.5 GB, the oldest frozen piece thaws. The oldest piece never freezes, so work
-  always drains. Nothing is killed.
-- **Runs a check once for every session.** `run --cache` keys on the exact content of the
-  working tree (HEAD's tree plus every changed or new file, read without writing to the repo),
-  the folder, the command and chosen environment variables. Not the worktree path: 100 worktrees
-  on the same code share one result. A run already in progress is waited for and shared; a
-  finished success is reused; a failure is only kept with `--cache-failures`.
-- **Shares the CPU by chat, not by thread.** `adopt` keeps one lane per chat. With `--balance`,
-  while a chat waits for the CPU, any chat taking well over an equal share has its threads
-  dropped to the lowest priority, so a chat running 48 busy threads can't starve one running 2.
-  It is off by default: on a busy PC it held some chat back most of the time. `fairshare
-  throttle` caps one chat outright.
-- **Every tool call goes through one thread shell.** The `hook` replaces agent-guard for Claude
-  Code, Codex and OpenCode. It passes, rewrites, or sends back each call, and runs long tests and
-  builds through `exec`, which keeps their output out of the chat, stops them before the agent's
-  time limit, and stops a run that has hung.
-- **Sends back hand-made waits.** A foreground Claude command that only polls for another job to
-  finish (a loop that sleeps until a file or log changes, a `node -e` script that rereads a log on a
-  timer, `timeout 590 tail -f`, or `fairshare await` typed by hand) is answered with the tool's own
-  background option and its completion notice instead. Such waits run to their timeout while the
-  job is still going and get run again: about 150 minutes of reruns in the two days to 2026-11-08.
-  Server readiness loops (`curl`), loops over a fixed list, polls that give up within 3 minutes,
-  and anything already in the background pass.
-- **Explains a PowerShell call that never started.** Claude's PowerShell tool sometimes fails with
-  only "Access is denied." (11 times in 8 chats on 2026-11-07). The hook, on Claude's
-  `PostToolUseFailure`, adds that nothing ran, and for a CPU-load or process check points to Owl's
-  `answers whats-running`.
-- **Runs as many heavy jobs at once as the PC has room for.** A command on the heavy list waits for
-  a heavy-job slot shared by every chat and repo; any other command never waits. Two slots are
-  always there. A third and fourth are granted only while nothing fills the screen in the
-  foreground (a game, a video), the newest heavy job has run 30 seconds (so its load shows), the
-  cores the command used on its last run leave 4 cores idle, and its last run's peak memory leaves
-  8 GB free. Without slots, six chats each started a full suite and tests failed on their own time
-  limits instead of on bugs; on 2026-11-08 two copies of an all-core test suite on a PC already at
-  99% CPU did the same (`fairshare bench slots`). A fixed two, though, left heavy commands waiting
-  2.1 minutes per run, 33 hours in the week to 2026-11-08, while the PC often sat at a third of its
-  CPU. `FAIRSHARE_HEAVY_SLOTS=<n>` fixes the count at n instead. A slot is a lock file Windows
-  frees when its holder exits, however it exits, and a waiting run names who holds each slot, why
-  it waits, and how to run the check on a boat.dev Linux machine instead. Work started inside a
-  slot never waits again.
-- **Keeps boat.dev to two machines at once, across every repo.** A tool that starts a boat machine
-  first runs `fairshare lease boat` and holds the lease for that machine's whole life
-  (`BOAT_MAX_MACHINES` changes the count; boat's own paid plan allows 100). Checking `boat list` and
-  then starting is not enough: a machine is missing from the list while it is created, so starts in
-  those seconds all got in, and three ran at once on 2026-11-07. Leases are slots in their own
-  queue, freed by Windows when the holder exits, so a crashed tool never keeps one. A holder names
-  its machine once boat reports it, and a lease is handed out only while the other holders plus the
-  listed machines nobody names stay under the cap, so a machine left running by a killed run still
-  counts until it ends. fairshare never deletes a machine. The long-lived machine T3 threads run on
-  (named `t3-host`) is not a check machine and is left out of the count; `BOAT_LEASE_IGNORE_NAMES`
-  (comma-separated) changes which names are left out.
-- **Learns what is heavy instead of guessing.** Every run `exec` takes, and every run the hook puts
-  `fairshare slot` in front of (background runs, runs that write to a file, piped test or build
-  runs), is measured. The first time one run of a command uses 120 CPU-seconds, the command joins
-  `%LOCALAPPDATA%\fairshare\heavy.json`: one entry per repo (its origin URL, so every worktree
-  shares it) and command, with its CPU, wall time, peak memory, first and last run, and run count.
-  Edit it by hand; deleting an entry takes the command off. `install` starts the list once from the
-  runs already in the event log, and `fairshare report` shows it.
-- **Logs every data point.** One JSON line per tool call, long run, chat and `adopt` session goes
-  to `%LOCALAPPDATA%\fairshare\events.jsonl`. `fairshare report` reads it back.
+- **Measures.** On Windows a small meter looks at the PC every 5 seconds: how busy each logical
+  processor is, how many threads want a processor and have none, free memory, free disk, what
+  fills the screen in the foreground and when the keyboard was last used. On Linux the kernel
+  already keeps those averages, so there is no meter and `fairshare reading` reads them. Both
+  give the same reading in the same units: processors, GB of memory, GB of disk.
+- **Answers one question: is there room?** `fairshare room` says yes while, with the new thread
+  counted, the processors the work wants stay under the target share of the processors agent
+  work may use, an eighth of the memory stays free and 15 GB of disk stays free. What the work
+  wants is the processors in use plus the threads waiting for one, and the higher of the last
+  minute and the last 10 minutes (5 on Linux), so neither a calm minute in a busy hour nor a calm
+  hour before a busy minute lets a thread in. A new thread counts as the machine's own measured
+  average per open thread, never under one processor and 2 GB, and threads let in during the last
+  5 minutes still count at that estimate, because their load does not show yet.
+- **Keeps for the user what the user is using.** The reserve is the most the user's own programs
+  used in the last 3 minutes, times 1.5 (times 2 while something is full screen), in whole
+  physical cores. It grows on the look that sees them use more or wait for a processor, and
+  shrinks only after the whole window has been quieter. It remembers what each full-screen program
+  needed the last time, so a game gets its processors on its first look, and what the desk needed
+  before the user walked away, which is put back on the first key press. Nobody tells it anything.
+  The least is one physical core and the most is half the machine. Owl holds agent work off the
+  reserved processors; fairshare tells it the number for three minutes at a time and says it again
+  every minute, so if the meter ever stops, Owl puts its own number back.
+- **Keeps the line.** A launch that finds no room is not lost. With `--queue` it waits in
+  fairshare's line with its whole request, in the order it came. After every look the meter checks
+  the front of the line; when the machine has room for it, that room is held for 10 minutes and the
+  thread that asked is told, and the same launch sent again goes straight in. The line is strict:
+  the first launch that does not fit stops it, and a new arrival passes it only when there is room
+  for everyone waiting too. An offer nobody takes goes to the back, and leaves after six. fairshare
+  does not start the thread itself: a launch passes through hooks that place it and pick its model,
+  and the command line that starts threads cannot say everything a launch can (an existing
+  worktree, a model's effort, who launched it), so the thread that asked sends the identical
+  request.
+- **Says why.** A refusal names the numbers: processors in use, threads waiting, the limit and
+  what set it, and the busiest programs. Every answer goes to `decisions.jsonl`.
+
+It never runs per command and never touches another process. The first fairshare put a hook in
+front of every agent command and every process in a Windows job; that cost 130 to 160 ms a call
+and broke commands, and it was removed on 2026-11-08. That code is the tag `v1-final`.
+
+## Install
+
+Windows, Go 1.26.5 or newer:
+
+```
+go build -o fairshare.exe . && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o fairshare-linux .
+.\fairshare.exe install
+```
+
+`install` copies both programs to `%LOCALAPPDATA%\fairshare\bin`, puts a `fairshare` starter in
+`~/bin` and `~/.local/bin` when they exist (so it is a command in Git Bash, cmd and PowerShell),
+and registers the scheduled task
+`fairshare-meter`, which starts the meter with no window, within a minute of logon, and again
+within a minute if it ever ends. No admin rights. `fairshare install --uninstall` stops the meter
+and removes the task. On Linux there is nothing to install: copy `fairshare-linux` anywhere.
 
 ## Commands
 
 ```
-fairshare adopt                          every chat's work becomes fair, no agent changes (install runs it always)
-fairshare adopt --pid 1234               only the chat whose own process is 1234 (tests)
-fairshare throttle                       the chats adopt holds: cores now, CPU so far, processes, caps
-fairshare throttle 1234 10               cap the chat with process 1234 in it at 10% of the PC (off removes it)
-fairshare install                        hook in Claude Code, Codex and OpenCode, and adopt always on
-fairshare install --uninstall            take all of that back out
-fairshare report --hours 24              what every chat ran, waited on, cost and wasted
-fairshare run -- bun run test            one command (and all it starts) as fair agent work
-fairshare run --cache -- bun run check   ...and once per code state across all sessions
-fairshare run --normal -- strobe record …  a measurement at normal priority, outside the chat's lane (strobe
-                                         refuses frame and input-latency metrics at idle priority), on a
-                                         private desktop: the browser windows it opens are never on screen
-                                         and never take a game's focus
-fairshare probe --secs 10                how a game-like foreground app is doing right now
-fairshare bench --jobs 50 --mode plain   50 heavy synthetic jobs against the probe (or --mode fair)
-fairshare bench lanes                    a 48-thread chat against a 2-thread one, under each way of sharing
-fairshare bench slots --at 1,2,3,4 -- bun run test   a real heavy command 1-4 copies at once: wall time, failures, PC load
-fairshare ceiling --what idle|spawn      how many idle processes / starts per second the PC takes
-fairshare du <folders>                   real disk use, counting hardlinked files once
-fairshare inspect                        the priorities and desktop Windows gave this process
-fairshare slot bun run check             measure it; if it is on the heavy list, first wait for a slot (the hook adds this)
-fairshare lease boat --label "<what>"    wait for one of the two boat machine leases, print "held", keep it until stdin closes
-fairshare lease boat -- boat run ...     run a boat command holding a lease, for a one-off machine by hand
+fairshare status                 what the machine has, what work is taking, and whether a thread fits
+fairshare room --threads 7 --checkout --take --label "<what>"
+                                 the answer a launch asks for: exit 0 room, 1 no room, 2 cannot tell
+fairshare room ... --queue --key <k> --launcher <thread> --request <file|->
+                                 no room: wait in the line; the launcher is told when its turn comes
+fairshare queue                  the line, in order; `queue drop <id>` takes a launch out
+fairshare room --reading <file>  the same rule on a reading from another machine
+fairshare reading                this machine's reading as JSON
+fairshare history --hours 24     how full it ran, how long work waited, the reserve unused
+fairshare settings               the numbers in use and the file they come from
 ```
 
-`fairshare install` makes `adopt` part of the PC rather than of one agent: a scheduled task (no
-admin) runs one `adopt` for every chat, with no window, and brings it back within a minute of
-logon or of it ending. A second `adopt` sees the first and exits. Installing again stops the
-running one cleanly (it logs its chats) and starts the new copy.
+`room` exits 2 and prints `degraded: <cause>` when it cannot tell (the meter is not running, the
+settings do not parse). A caller then falls back to whatever it did before and says so.
 
-A chat is any process T3 Code starts, whatever the provider: T3 starts each session (Claude Code,
-Codex, OpenCode, anything else) as its own child, so `adopt` never needs to know a provider's
-program name. T3's own git checks count as their own small chats. Outside T3, a chat is the nearest
-`claude.exe`, `codex.exe` or `opencode.exe` (an agent started from a terminal); an agent that a T3
-chat starts is that chat's work. The rule is in `chat.go`; the hook uses it too, so every call is
-logged against its chat.
+## Settings
 
-`adopt` puts each process started under a chat into that chat's lane; whatever it starts
-afterwards is in the lane too. It waits until Windows has let the process's first thread run:
-a Store PowerShell given two jobs before then fails to start with "Access is denied" (4 of 150
-starts with two placers and no wait, 0 with it). The chat's own process stays at normal priority, so the agent's own
-loop stays quick. When the chat's process exits, everything still in its lane ends. If `adopt`
-itself stops, work it adopted runs on at its low priority.
+`settings.json` in fairshare's home (`%LOCALAPPDATA%\fairshare`, or `~/.local/state/fairshare`),
+read on every call. None of them is a count of threads.
 
-A lane is a job named after the chat's harness process. A process that is already inside another
-job gets a side job of its own instead, which Windows nests where the process already is:
-- the Microsoft Store PowerShell, which every PowerShell command on this PC runs in;
-- a test run that made its own job.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `cpu_target` | 0.90 | share of the agent processors filled while someone is at the PC |
+| `cpu_target_full_screen` | 0.75 | that share while something fills the screen |
+| `cpu_target_away` | 1.00 | that share with nobody at the PC, and on a machine with no screen |
+| `away_minutes` | 10 | no keyboard or mouse for this long is away |
+| `mem_reserve_fraction` | 0.125 | share of memory that always stays free |
+| `disk_reserve_gb` | 15 | disk that always stays free where work is checked out |
+| `thread_cores`, `thread_mem_gb`, `thread_disk_gb` | 1, 2, 5 | the least a new thread counts as |
+| `settle_minutes` | 5 | how long a thread just let in counts at its estimate |
+| `reserve_min_processors` | 2 | the least kept for the user |
+| `reserve_max_share` | 0.5 | the most, as a share of the machine |
+| `reserve_headroom`, `reserve_headroom_full_screen` | 1.5, 2 | room over what the user's programs used |
+| `reserve_window_seconds` | 180 | how far back "used" looks |
+| `reserved_processors` | unset | set it to pin the reserve and switch the measuring off |
+| `sample_seconds` | 5 | how often the meter looks |
+| `queue_notify` | unset | the command that tells a thread its launch has room (one JSON notice on stdin) |
+| `queue_hold_minutes` | 10 | how long room is held for a launch that was told |
+| `queue_offers`, `queue_max_hours` | 6, 24 | untaken offers, and hours in the line, before a launch leaves it |
 
-Only processes in no job go into the main job, so a test run's job closing can never take the
-chat's other work with it. A side job allows breakaway: Claude Code and Codex start every shell in
-a job that allows it, and Git Bash asks for it on every program it starts, so a side job that
-forbade it would make those starts fail with "Permission denied". Twice a second, from the same process list it uses to find new work,
-`adopt` measures each lane, applies throttles and (with `--balance`) holds back a hogging chat. That costs 2.5 ms
-per look, four looks a second: about 1% of one core.
+## What it measures on Windows, exactly
 
-The `hook` and `adopt` run from `%LOCALAPPDATA%\fairshare\bin`, so rebuilding a checkout never
-touches the copy every chat runs. OpenCode gets `opencode-plugin/` copied to
-`~/.config/opencode/plugins/fairshare`, which it loads at start.
+- Processors in use: each logical processor's idle time against its total, from one
+  `NtQuerySystemInformation` call. Processors from the reserve up are the agents'.
+- Threads waiting: every thread in the ready, standby or deferred-ready state, from the one call
+  that lists every process.
+- Agent work: processes at below-normal priority or lower, which is how Owl holds every agent
+  process. The user's programs: everything else in the user's own session. A process that starts
+  and ends between two looks is in the processor totals but in no program's line.
+- Memory: free physical memory, or free commit when that is less; the least seen in the last
+  minute. Disk: the home folder's drive.
+- Full screen: what Windows reports for notifications, or a borderless window covering its whole
+  monitor. A maximized window is not full screen.
 
-## Measured on Jon's PC (2026-10-28)
+## Measured on Jon's PC (2026-11-10, Ryzen 9 3900X, 24 logical processors, 64 GB)
 
-Ryzen 9 3900X, 64 GB. Other agent sessions were using 60–100% of the CPU throughout, so each
-bench compares 5-second slices with its jobs running and frozen, in the order on, off, off, on.
-Raw results are in `results/bench.jsonl`.
-
-### After the bench fix (2026-10-29)
-
-The first bench froze one of every three "running" slices by mistake (off, off suspended twice,
-on resumed once), so the 2026-10-28 tables further down understate the harm in both modes. With
-the fix, 50 always-busy jobs (`--kind math`, 4 threads each):
-
-| | late frames, frozen → running | worst frame | input delay p99, frozen → running |
-|---|---|---|---|
-| plain (today) | 0.2% → 75.0% | 13953 ms | 1.2 → 220 ms |
-| `run` | 1.0% → 6.4% | 111 ms | 3.8 → 6.6 ms |
-| plain under `adopt` (default) | 0.7% → 4.8% | 80 ms | 1.7 → 5.9 ms |
-
-### Calm PC, same conditions (2026-10-29 01:33–01:44)
-
-Other sessions used 16–47% of the CPU. Same 50 always-busy jobs, same order of slices:
-
-| | late frames, frozen → running | worst frame | input delay p99, frozen → running | time for 50 jobs |
-|---|---|---|---|---|
-| plain (today) | 0.0% → 15.8% | 2825 ms | 0.8 → 76.5 ms | 40 s |
-| `adopt` (default), run 1 | 0.0% → 0.6% | 25 ms | 0.8 → 4.3 ms | 47 s |
-| `adopt` (default), run 2 | 0.9% → 0.4% | 36 ms | 0.8 → 2.4 ms | 53 s |
-| `adopt --feedback`, run 1 | 5.1% → 1.0% | 42 ms | 9.5 → 2.0 ms | 70 s |
-| `adopt --feedback`, run 2 | 0.0% → 0.4% | 25 ms | 0.7 → 3.6 ms | 53 s |
-
-Lag freezing adds nothing on a calm PC (run 1's 70 s did not repeat), so it stays opt-in.
-
-### Real use: one chat under `adopt --pid` (2026-10-29)
-
-8 full Go rebuilds (`go build -a`, own cache each) started from a real Claude Code chat, while a
-stand-in game started outside that chat (by WMI, so `adopt` can't touch it) ran for 50 s. Other
-chats kept the CPU at 76–97% busy throughout.
-
-| | builds took | late frames | worst frame | frame p99 | input delay p99 |
-|---|---|---|---|---|---|
-| plain, run 1 | 21.4 s | 1.9% | 63 ms | 23.2 ms | 4.3 ms |
-| plain, run 2 | 22.9 s | 3.9% | 89 ms | 34.5 ms | 7.4 ms |
-| `adopt --pid`, run 1 | 45.5 s | 0.1% | 24 ms | 4.6 ms | 0.9 ms |
-| `adopt --pid`, run 2 | 42.5 s | 0.0% | 18 ms | 7.6 ms | 1.1 ms |
-| `adopt --pid`, run 3 | 46.0 s | 0.7% | 53 ms | 13.5 ms | 2.1 ms |
-
-The game stays smooth, but the protected chat's builds take about twice as long: at idle
-priority they wait behind the other chats' unprotected normal-priority work. Protecting one
-session out of many penalizes that session, so turn `adopt` on for every session at once, not
-one at a time.
-
-Testing trap: `adopt --pid` also adopts the harness's shells that already exist, and adopted
-work keeps its low priority after `adopt` stops. A "plain" run started from the same shell
-afterwards is not plain; start each run from a fresh shell.
-
-### Heavy-job slots: how many at once (2026-11-08)
-
-`fairshare bench slots` on appforgutters' backend suite (vitest, 1,806 tests with 30 s time
-limits), while the other chats kept the PC at 26–95% CPU. Wall time per copy, in seconds:
-
-| copies at once | all cores each (round 0) | 4 workers each, round 0 | 4 workers each, round 1 |
-|---|---|---|---|
-| 1 | 64 | 215 | 192 |
-| 2 | 125, 111 (one failed: 7 tests timed out) | 138, 136 | 238, 250 |
-| 3 | 104, 103, 143 (two failed: timeouts) | 159, 159, 160 | 186, 186, 175 |
-| 4 | not run | 271, 266, 298, 325 | 301, 331, 308, 317 |
-
-The all-core copies started with the PC already at 99–100% CPU and failed the way six full suites
-did on 2026-11-03. That run was stopped there rather than load the other chats' checks further.
-No 4-worker copy failed. Three at once took about as long per copy as two. Four took longer each
-but finished four jobs in about the time two-at-a-time takes for four, with the PC at 90–92% CPU,
-so four is the most. The room rule keeps the third and fourth for when the PC has the cores
-free: with 4 cores kept idle it would have refused the all-core copies and the fourth 4-worker copy
-once the PC passed about 80%.
-
-### Lanes: a 48-thread chat against a 2-thread chat (2026-10-29)
-
-`fairshare bench lanes`: each chat in its own idle-priority job, 5 s per slice, in the order
-shown and back. The share is how much of the 2 cores it asked for the light chat got.
-
-| how the heavy chat is held back | light chat's share | heavy chat |
+| | the count that applied | what fairshare measured |
 |---|---|---|
-| not at all (Windows alone) | 28%, 30% | 22.2, 23.3 cores |
-| equal CPU weight per job | 65%, 70% | 21.9, 22.6 cores |
-| hard cap at 22 of 24 cores | 28–53% | 21.7–21.9 cores |
-| light chat at below-normal priority | 100%, 100% | 20.8, 21.9 cores |
-| heavy chat's threads at lowest priority | 97%, 96% | 20.1, 20.9 cores |
+| 7 PC threads, 5 building Rust | 7 of 7: all let in | work wanted 36.0 of 16 processors: 15.3 in use, 20.7 waiting |
+| The same PC 4 minutes later | 7 of 7: an eighth refused | 5.0 of 22 in use, none waiting: room |
+| Boat host `t3-host-2`, a landing gate running | 0 of 4 threads: room | work wanted 28.1 of 8 processors |
+| Processors kept for Jon, away 45 minutes | 8, fixed | 4, then 2: 22 of 24 for agent work |
 
-The last row is what `adopt --balance` does: every chat stays at idle priority, below the game, as
-measured above. In the end-to-end test (`TestLanesGiveALightChatItsShare`, two fake chats under
-`adopt`), the light chat got 98% of what it asked for, against 28% without `--balance`.
-
-The thread shell's hook costs 19 ms a call, against agent-guard's 49 ms (node), on the same two
-calls alternated 15 times each. Inside a chat it logs 5–6 ms of its own work.
-
-### Before the bench fix (2026-10-28)
-
-50 realistic jobs (JS work on 4 threads, 20 small-file reads per unit, a child process every 20
-units):
-
-| | late frames, jobs frozen | late frames, jobs running | worst frame | input delay p99 |
-|---|---|---|---|---|
-| plain (today) | 2.4% | 27.6% | 1281 ms | 63 ms |
-| `run` | 5.0% | 4.7% | 69 ms | 11 ms |
-| plain under `adopt` | 1.6% | 1.9% | 39 ms | 5 ms |
-
-2 jobs shaped like the plant-fitting jobs (`--kind math`: 22 threads each of dense math that never
-waits), while another session's real fitting jobs held the PC at 100%:
-
-| | late frames, frozen → running | worst frame | input delay p99, frozen → running |
-|---|---|---|---|
-| plain | 59.9% → 55.7% | 1141 ms | 47 → 100 ms |
-| `run` | 38.9% → 54.5% | 168 ms | 36 → 67 ms |
-
-Fair removes the second-long freezes but did not remove all added delay for this kind of job. Not
-yet known whether that is the background drifting or Windows' starvation boost (a thread at idle
-priority that has waited ~4 s is briefly run above normal priority, so thousands of always-busy
-idle threads add up). `adopt --feedback` also freezes the youngest agent work while a
-normal-priority wake-up sensor runs late (95th percentile over 3 ms; thaws under 1.5 ms), the same
-way memory freezing works. It is off by default until measured on a calm PC: the sensor can't
-tell who causes the lag, so while unwrapped sessions hold the PC at 100% it freezes all wrapped
-work but the oldest. A guard process thaws everything if `adopt` is killed while work is frozen.
-
-50 sessions in 10 worktrees running the same check on the same code at once:
-
-| | time | runs |
-|---|---|---|
-| no cache | 107 s | 50 |
-| `--cache`, first time | 11.8 s | 1 (49 waited and shared it) |
-| `--cache`, again | 5.6 s | 0 (50 reused) |
+The meter and its numbers agree with Windows' own per-processor counters to the percent. One look
+costs two system calls; the hook that asks takes 20 ms on the PC and 0.7 s for a boat host.
 
 ## Develop
 
