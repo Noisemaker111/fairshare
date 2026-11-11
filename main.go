@@ -32,6 +32,8 @@ const usage = `fairshare: how much room this machine has for agent work, measure
   fairshare reading                this machine's reading as JSON
   fairshare history [--hours N]    what the meter saw: how full, how long work waited, the reserve unused
   fairshare repos                  what a session of each repo was measured using
+  fairshare pool                   every machine that joined, as one place: what is free, and where a thread fits
+  fairshare pool place|run ...     put a piece of work where there is room, without naming a machine ("pool help")
   fairshare settings               the numbers in use and the file they come from
   fairshare meter                  the meter itself (Windows; install runs it)
   fairshare install [--uninstall]  make the meter part of this PC (Windows)
@@ -60,6 +62,8 @@ func main() {
 		err = cmdSettings()
 	case "repos":
 		err = cmdRepos(args)
+	case "pool":
+		os.Exit(cmdPool(args))
 	case "meter":
 		err = runMeter()
 	case "install":

@@ -1,0 +1,289 @@
+# The pool end to end, through the built fairshare in private homes: three machines, each its own
+# home and its own reading, reached the way a real member is (a command put in front of the
+# command), with a real wake command, a real plan-hours command, real git checkouts and a stand-in
+# for Hona/mesh that prints what mesh's SPEC says it prints. Readings are written by hand so "full"
+# and "room" are certain whatever this machine is doing.
+# Usage: python -I pool-e2e.py <fairshare program>      (Windows and Linux)
+import json, os, shutil, subprocess, sys, tempfile
+from datetime import datetime, timezone
+
+exe = os.path.abspath(sys.argv[1])
+root = tempfile.mkdtemp(prefix="fs-pool-")
+py = sys.executable
+fails = 0
+home = {n: os.path.join(root, n) for n in ("pc", "host-a", "host-b", "meshed")}
+for h in home.values():
+    os.makedirs(h)
+
+# A machine: its home, and whether it answers. `via.py <home> <command...>` runs the command there.
+via = os.path.join(root, "via.py")
+open(via, "w").write(
+    "import os, subprocess, sys\n"
+    "home = sys.argv[1]\n"
+    "if os.path.exists(os.path.join(home, 'asleep')):\n"
+    "    sys.stderr.write('connect: the machine is stopped\\n'); sys.exit(255)\n"
+    "env = dict(os.environ, FAIRSHARE_HOME=home, FAIRSHARE_READING=os.path.join(home, 'reading.json'))\n"
+    "sys.exit(subprocess.run(sys.argv[2:], env=env).returncode)\n")
+wake = os.path.join(root, "wake.py")
+open(wake, "w").write(
+    "import os, sys\n"
+    "home = sys.argv[1]\n"
+    "open(os.path.join(home, 'wakes'), 'a').write('woke\\n')\n"
+    "os.path.exists(os.path.join(home, 'asleep')) and os.remove(os.path.join(home, 'asleep'))\n")
+hours = os.path.join(root, "hours.py")
+open(hours, "w").write("import os, sys\nprint(open(os.path.join(sys.argv[1], 'hours')).read())\n")
+# Hona/mesh, as far as the pool uses it: `status --json --fast` and `exec --no-stall <device> <command...>`.
+mesh = os.path.join(root, "mesh.py")
+open(mesh, "w").write(
+    "import json, os, subprocess, sys\n"
+    "root = os.path.dirname(os.path.abspath(__file__))\n"
+    "state = json.load(open(os.path.join(root, 'mesh.json')))\n"
+    "if sys.argv[1:4] == ['status', '--json', '--fast']:\n"
+    "    print(json.dumps(state)); sys.exit(0)\n"
+    "if sys.argv[1:3] == ['exec', '--no-stall']:\n"
+    "    device = [d for d in state['devices'] if d['name'] == sys.argv[3]]\n"
+    "    if not device or not device[0]['online']:\n"
+    "        sys.stderr.write('mesh: %s: offline\\n' % sys.argv[3]); sys.exit(255)\n"
+    "    sys.exit(subprocess.run([sys.executable, '-I', os.path.join(root, 'via.py'), os.path.join(root, sys.argv[3])] + sys.argv[4:]).returncode)\n"
+    "sys.exit(2)\n")
+
+readings = {}
+
+
+def reading(name, demand, processors=8, reserved=0, state="none", system="linux"):
+    readings[name] = (demand, processors, reserved, state, system)
+
+
+def stamp():
+    """Every reading again, as of now: a machine never answers from an old one."""
+    for name, (demand, processors, reserved, state, system) in readings.items():
+        capacity = processors - reserved
+        r = {"machine": name, "os": system, "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+             "processors": processors, "reserved": reserved, "capacity": capacity, "short_seconds": 60, "long_seconds": 600,
+             "busy_short": demand, "busy_long": demand, "demand_short": demand, "demand_long": demand, "firm_short": demand, "firm_long": demand,
+             "mem_total_gb": 64, "mem_avail_gb": 40, "disk_path": root, "disk_free_gb": 200,
+             "presence": {"state": state, "idle_minutes": 0}}
+        json.dump(r, open(os.path.join(home[name], "reading.json"), "w"))
+
+
+def fs(*args, at="pc"):
+    stamp()
+    env = dict(os.environ, FAIRSHARE_HOME=home[at], FAIRSHARE_READING=os.path.join(home[at], "reading.json"))
+    done = subprocess.run([exe, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+    return done.returncode, done.stdout.strip(), done.stderr.strip()
+
+
+def placed(*args, at="pc"):
+    code, out, err = fs("pool", "place", "--json", *args, at=at)
+    try:
+        return code, json.loads(out), out + err
+    except ValueError:
+        return code, {}, out + err
+
+
+def check(name, ok, detail=""):
+    global fails
+    fails += 0 if ok else 1
+    print("OK  " if ok else "FAIL", name, "" if ok else "-> " + str(detail)[:700])
+
+
+def lines(path):
+    return [l for l in open(path).read().splitlines() if l.strip()] if os.path.exists(path) else []
+
+
+def git(folder, *args):
+    return subprocess.run(["git", "-C", folder, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], capture_output=True, text=True).stdout.strip()
+
+
+# One repo, on the PC in a folder of its own name and on host-a under its folder of repos.
+pc_repo = os.path.join(root, "pc-checkouts", "demo")
+os.makedirs(pc_repo)
+git(pc_repo, "init", "-q", "-b", "main")
+open(os.path.join(pc_repo, "file.txt"), "w").write("one\n")
+git(pc_repo, "add", "."), git(pc_repo, "commit", "-q", "-m", "one")
+first = git(pc_repo, "rev-parse", "HEAD")
+open(os.path.join(pc_repo, "file.txt"), "w").write("two\n")
+git(pc_repo, "commit", "-q", "-am", "two")
+host_work = os.path.join(root, "host-a-work")
+os.makedirs(host_work)
+subprocess.run(["git", "clone", "-q", pc_repo, os.path.join(host_work, "demo")], capture_output=True)
+host_repo = os.path.join(host_work, "demo")
+busy = os.path.join(home["host-a"], "gates")
+
+# The PC: 24 processors, 4 kept for the person at it, so 20 for agent work filled to 90% (18).
+reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
+reading("host-a", 0.5)
+reading("host-b", 0.5)
+reading("meshed", 0.5)
+
+
+def words(*argv):
+    return json.dumps(list(argv))
+
+
+code, out, err = fs("pool")
+check("with no machine joined the pool says so and how to join", code == 2 and "fairshare pool join" in err, out + err)
+code, out, err = fs("pool", "join", "--name", "pc", "--can", "gpu,deploy", "--repos", "demo=" + pc_repo)
+check("this machine joins with one command", code == 0 and "pc joined the pool: windows, 24 processors, this machine" in out, out + err)
+code, out, err = fs("pool", "join", "--name", "host-a", "--via", words(py, "-I", via, home["host-a"]), "--fairshare", exe,
+                    "--work", host_work, "--busy-dir", busy, "--extra", "t3_env=env-a")
+check("another machine joins with one command, reached through its via", code == 0 and "host-a joined the pool: linux, 8 processors" in out, out + err)
+code, out, err = fs("pool", "join", "--name", "host-b", "--via", words(py, "-I", via, home["host-b"]), "--fairshare", exe,
+                    "--wake", words(py, "-I", wake, home["host-b"]), "--hours", words(py, "-I", hours, home["host-b"]), "--keep-hours", "10")
+check("a machine with plan-hours joins the same way", code == 0 and "The pool has 3: pc, host-a, host-b" in out, out + err)
+code, out, err = fs("pool", "join", "--name", "ghost", "--via", words(py, "-I", via, os.path.join(root, "nowhere")), "--fairshare", os.path.join(root, "no-such-program"))
+check("a machine that does not answer does not join", code == 2 and "did not join" in err and "ghost" not in fs("pool")[1], out + err)
+
+open(os.path.join(home["host-b"], "asleep"), "w").close()
+open(os.path.join(home["host-b"], "hours"), "w").write("40")
+code, out, err = fs("pool")
+check("the pool is one place: what the awake machines have together, and who sleeps",
+      code == 0 and "3 machines, 2 awake" in out and "32 processors, 28 of them for agent work" in out and "Asleep, woken only when the others are full: host-b" in out, out + err)
+check("the processors kept for the person at the PC are not the pool's", any(l.split()[:6] == ["pc", "room", "windows", "24", "4", "20"] for l in out.splitlines()), out)
+check("a sleeping machine's plan-hours are shown", "40.0 plan-hours left" in out, out)
+
+code, pl, raw = placed("--label", "a thread")
+check("an idle PC takes it: the most processors left (15.0 against 6.5)", code == 0 and pl.get("machine") == "pc" and pl.get("local") is True
+      and [m["free"] for m in pl["machines"][:2]] == [15.0, 6.5], raw)
+
+# Jon plays: 12 of 24 kept for him, 12 for agent work filled to 75% (9), 8.5 in use.
+reading("pc", 8.5, processors=24, reserved=12, state="full-screen", system="windows")
+code, pl, raw = placed("--label", "a thread", "--take")
+check("while a game holds the PC the host takes it, and nobody named a machine", code == 0 and pl.get("machine") == "host-a" and pl.get("took") is True
+      and "pc is full (8.5 of 9.0 in use)" in pl.get("reason", ""), raw)
+check("the caller gets the member's own fields back", pl.get("extra") == {"t3_env": "env-a"}, raw)
+grants = json.load(open(os.path.join(home["host-a"], "grants.json")))
+check("it counts on the host until its load shows", len(grants) == 1 and grants[0]["label"] == "a thread", grants)
+check("the sleeping host was not woken for it", not lines(os.path.join(home["host-b"], "wakes")), raw)
+code, pl, raw = placed("--needs", "gpu")
+check("work that needs the PC's GPU waits for the PC and wakes nobody", code == 1 and not lines(os.path.join(home["host-b"], "wakes"))
+      and "host-a is not open to it (cannot do gpu)" in pl.get("reason", ""), raw)
+code, pl, raw = placed("--needs", "linux")
+check("work that needs Linux never lands on the PC", code == 0 and pl.get("machine") == "host-a", raw)
+
+reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
+code, pl, raw = placed("--among", "host-a")
+check("work that may use only some machines stays on them", code == 0 and pl.get("machine") == "host-a", raw)
+reading("host-a", 7.5)  # 7.5 in use, a thread just let in counts as 1 more: over its 8
+code, pl, raw = placed("--among", "host-a,host-b", "--no-wake")
+check("asked not to wake, the pool names the sleeping machine for the caller to wake", code == 0 and pl.get("machine") == "host-b" and pl.get("asleep") is True
+      and not lines(os.path.join(home["host-b"], "wakes")), raw)
+
+reading("pc", 17.9, processors=24, reserved=4, state="active", system="windows")
+code, pl, raw = placed("--label", "needs a wake", "--take")
+check("only with every awake machine full is the sleeping host woken, and it takes the work", code == 0 and pl.get("machine") == "host-b" and pl.get("woke") is True
+      and lines(os.path.join(home["host-b"], "wakes")) == ["woke"], raw)
+check("and the work counts there", [g["label"] for g in json.load(open(os.path.join(home["host-b"], "grants.json")))] == ["needs a wake"], raw)
+
+open(os.path.join(home["host-b"], "asleep"), "w").close()
+open(os.path.join(home["host-b"], "hours"), "w").write('{"left": 8}')
+code, pl, raw = placed("--label", "no hours for it")
+check("with 8 plan-hours left and 10 kept the host stays asleep and the pool is full", code == 1 and not pl.get("ok")
+      and "8.0 plan-hours are left and 10.0 are kept" in pl.get("reason", "") and len(lines(os.path.join(home["host-b"], "wakes"))) == 1, raw)
+open(os.path.join(home["host-b"], "hours"), "w").write("who knows")
+code, pl, raw = placed()
+check("plan-hours that cannot be read are never spent", code == 1 and "could not be read" in pl.get("reason", "")
+      and len(lines(os.path.join(home["host-b"], "wakes"))) == 1, raw)
+
+# Runs: a command goes where there is room, in the repo's folder there.
+reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
+reading("host-a", 0.5)
+where = [py, "-c", "import os; print(os.path.realpath(os.getcwd()))"]
+code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
+check("a run with room on the PC runs in the PC's folder for the repo", code == 0 and out == os.path.realpath(pc_repo) and "pc takes it" in err, out + err)
+code, out, err = fs("pool", "run", "--repo", "demo", "--", py, "-c", "import sys; sys.exit(7)")
+check("the command's exit is the run's exit", code == 7 and "exit 7" in err, out + err)
+reading("pc", 17.9, processors=24, reserved=4, state="active", system="windows")
+code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
+check("with the PC full the same run goes to the host, in the host's folder", code == 0 and out == os.path.realpath(host_repo) and "host-a takes it" in err, out + err)
+show = "import os, subprocess; print(subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()); print(open('file.txt').read().strip()); print(os.listdir(r'%s'))" % busy
+code, out, err = fs("pool", "run", "--repo", "demo", "--commit", first, "--label", "a gate", "--", py, "-c", show)
+got = out.splitlines()
+check("a gate runs on exactly the commit asked for, not what the folder has checked out", code == 0 and got[:2] == [first, "one"], out + err)
+check("while it runs the host's idle watch can see it", len(got) == 3 and "pool-" in got[2], out)
+check("and nothing is left behind: no mark, no extra checkout, the folder as it was", os.listdir(busy) == [] and len(git(host_repo, "worktree", "list").splitlines()) == 1
+      and open(os.path.join(host_repo, "file.txt")).read().strip() == "two", os.listdir(busy))
+code, out, err = fs("pool", "run", "--repo", "elsewhere", "--", *where)
+check("a repo no machine has is not run anywhere", code == 69 and "no folder" in err, out + err)
+reading("host-a", 7.9)
+code, out, err = fs("pool", "run", "--repo", "demo", "--", *where)
+check("a run with the whole pool full does not run, and says who is full", code == 69 and "No machine in the pool has room" in err and out == "", out + err)
+record = [json.loads(l) for l in lines(os.path.join(home["pc"], "decisions.jsonl"))]
+runs = [r for r in record if r.get("event") == "pool run"]
+check("every placement and run is on the record, with how long each took", len(runs) == 4 and runs[-1]["machine"] == "host-a" and runs[-1]["commit"] == first
+      and all("seconds" in r for r in record if r.get("event") == "pool place"), runs)
+
+# A machine that cannot tell is not a machine that is full.
+readings.pop("pc")
+os.remove(os.path.join(home["pc"], "reading.json"))
+code, pl, raw = placed()
+check("when a machine cannot tell and the rest are full, the pool cannot tell either", code == 2 and [m["state"] for m in pl.get("machines", [])][:2] == ["degraded", "full"], raw)
+reading("host-a", 0.5)
+code, pl, raw = placed()
+check("and when another has room the work goes there", code == 0 and pl.get("machine") == "host-a", raw)
+# A carrier that wakes a machine just by being used: the member's own check is asked first.
+open(os.path.join(home["host-b"], "state"), "w").write("boat-host: host-b stopped")
+state = os.path.join(root, "state.py")
+open(state, "w").write("import os, sys\nprint(open(os.path.join(sys.argv[1], 'state')).read())\n")
+os.path.exists(os.path.join(home["host-b"], "asleep")) and os.remove(os.path.join(home["host-b"], "asleep"))
+pool = json.load(open(os.path.join(home["pc"], "pool.json")))
+for m in pool["members"]:
+    if m["name"] == "host-b":
+        m["awake"], m["awake_match"] = [py, "-I", state, home["host-b"]], r" (ready|idle|running)\b"
+        m["via"] = [py, "-I", os.path.join(root, "via-counted.py"), home["host-b"]]
+json.dump(pool, open(os.path.join(home["pc"], "pool.json"), "w"))
+open(os.path.join(root, "via-counted.py"), "w").write(
+    "import os, subprocess, sys\n"
+    "open(os.path.join(sys.argv[1], 'reached'), 'a').write('reached\\n')\n"
+    "sys.exit(subprocess.run([sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'via.py')] + sys.argv[1:]).returncode)\n")
+open(os.path.join(home["host-b"], "hours"), "w").write("3")
+reading("host-a", 7.9)
+code, pl, raw = placed()
+states = {m["name"]: m["state"] for m in pl.get("machines", [])}
+check("a machine its own check calls stopped is asleep, and nothing is sent through its carrier", states.get("host-b") == "asleep"
+      and not lines(os.path.join(home["host-b"], "reached")), raw)
+open(os.path.join(home["host-b"], "state"), "w").write("boat-host: host-b ready t3-env=1")
+code, pl, raw = placed()
+check("once its check calls it ready it is asked like any machine", code == 0 and pl.get("machine") == "host-b"
+      and len(lines(os.path.join(home["host-b"], "reached"))) == 1, raw)
+reading("host-a", 0.5)
+code, out, err = fs("pool", "leave", "host-b")
+check("a machine leaves with one command", code == 0 and "2 machines remain" in out, out + err)
+
+# Hona/mesh: the mesh's devices are the pool's machines, reached through `mesh exec`.
+os.makedirs(os.path.join(root, "blade"))
+os.makedirs(os.path.join(root, "air"))
+home["blade"], home["air"] = os.path.join(root, "blade"), os.path.join(root, "air")
+reading("blade", 6, processors=16, system="windows")
+reading("air", 0.5)
+
+
+def mesh_is(*devices):
+    json.dump({"self": "meshed", "devices": [{"name": "meshed", "self": True, "os": "linux", "online": True}] + list(devices)}, open(os.path.join(root, "mesh.json"), "w"))
+
+
+mesh_is({"name": "blade", "self": False, "os": "windows", "online": True}, {"name": "air", "self": False, "os": "macos", "online": False})
+code, out, err = fs("pool", "join", "--mesh", "--mesh-program", words(py, "-I", mesh), at="meshed")
+check("the pool follows the mesh with one command", code == 0 and "3 devices, 3 machines in the pool" in out, out + err)
+pool = json.load(open(os.path.join(home["meshed"], "pool.json")))
+blade = [m for m in pool["members"] if m["name"] == "blade"][0]
+check("a mesh device is reached through `mesh exec`", blade["via"][-3:] == ["exec", "--no-stall", "blade"] and blade["from"] == "mesh", blade)
+blade["fairshare"] = exe  # where fairshare is on that device
+json.dump(pool, open(os.path.join(home["meshed"], "pool.json"), "w"))
+code, pl, raw = placed(at="meshed")
+states = {m["name"]: m["state"] for m in pl.get("machines", [])}
+check("work is placed across the mesh: blade's 9 free processors beat this machine's 6.5", code == 0 and pl.get("machine") == "blade"
+      and states == {"meshed": "room", "blade": "room", "air": "unreachable"}, raw)
+mesh_is({"name": "blade", "self": False, "os": "windows", "online": True}, {"name": "air", "self": False, "os": "macos", "online": True},
+        {"name": "vps", "self": False, "os": "linux", "online": False})
+code, out, err = fs("pool", at="meshed")
+check("a device that joins the mesh is in the pool with no further command", code == 0 and "4 machines" in out and "vps" in out, out + err)
+kept = [m for m in json.load(open(os.path.join(home["meshed"], "pool.json")))["members"] if m["name"] == "blade"][0]
+check("and what was set on a device by hand is kept", kept.get("fairshare") == exe, kept)
+mesh_is({"name": "blade", "self": False, "os": "windows", "online": True})
+code, out, err = fs("pool", at="meshed")
+check("a device that leaves the mesh leaves the pool", code == 0 and "2 machines" in out and "air" not in out, out + err)
+
+shutil.rmtree(root, ignore_errors=True)
+print("failures:", fails)
+sys.exit(1 if fails else 0)

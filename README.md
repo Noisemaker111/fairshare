@@ -109,11 +109,90 @@ fairshare room --reading <file>  the same rule on a reading from another machine
 fairshare reading                this machine's reading as JSON
 fairshare history --hours 24     how full it ran, how long work waited, the reserve unused
 fairshare repos                  what a session of each repo was measured using
+fairshare pool                   every machine that joined, as one place (see The pool)
 fairshare settings               the numbers in use and the file they come from
 ```
 
 `room` exits 2 and prints `degraded: <cause>` when it cannot tell (the meter is not running, the
 settings do not parse). A caller then falls back to whatever it did before and says so.
+
+## The pool
+
+Every machine that joined is one place to run work. A piece of work says what it is (a repo, what
+it needs), never which machine, and the pool puts it where there is room.
+
+```
+fairshare pool                   the machines as one: what they have, what is in use, where a thread fits
+fairshare pool join              this machine joins
+fairshare pool join --name t3-host-2 --via "boat ssh <id>" --wake "boat resume <id>" --work /home/user/work
+                                 another machine joins: --via is the words that run a command on it
+fairshare pool join --mesh       every device of a Hona/mesh mesh joins, and the pool follows the mesh
+fairshare pool place --repo owl-go --take --json
+                                 where a thread goes: exit 0 and the machine, 1 no machine takes it, 2 cannot tell
+fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install && bun run gate"
+                                 a gate or a build, run where there is room, on exactly that commit
+```
+
+- **Each machine answers for itself.** The pool asks every member `fairshare room`, the question a
+  launch already asks one machine, and compares the answers. The processors kept for the person at
+  the PC are out of the pool before the pool sees them, and a machine's own settings, line and
+  measured repos decide its answer.
+- **The most room wins.** Of the machines that have room, the work goes to the one with the most
+  processors left once it is counted. `--take` counts it there until its load shows, and the
+  answer that takes it is the one that decides, so two launches at once cannot both be told yes
+  on room for one.
+- **Plan-hours.** A machine with a `wake` command that does not answer is asleep. It is woken
+  only when no machine that is awake has room, and when it has an `hours` command, only while
+  that prints more plan-hours left than the member's `keep_hours`. Hours that cannot be read are
+  never spent.
+- **What work needs.** `--needs windows,deploy` keeps work on machines that are that OS or were
+  joined with `--can deploy`; `--among a,b` on the machines named. A run in a repo goes only to a
+  machine that has the repo's folder, checked on the machine at that moment.
+- **A run.** `pool run` runs the command in the repo's folder on the machine picked, through that
+  machine's own fairshare, and its exit is the command's (69 when the pool could not run it).
+  With `--commit` it runs in a fresh checkout of exactly that commit, which is removed after; the
+  folder's own checkout is not touched. On a member with a `busy_dir` it leaves its process id
+  there while it runs, so the machine's idle watch does not put it to sleep under the run.
+
+The pool is `pool.json` in the home of the machine that places work. A member:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | what the pool calls it |
+| `via` | the words that run a command on it, put in front of the command; none for this machine |
+| `fairshare` | the fairshare program there; unset, `fairshare` on its PATH |
+| `wake` | run on this machine when it does not answer; without it a silent machine is skipped |
+| `awake`, `awake_match` | run on this machine before anything is sent: up when it exits 0 and prints what the pattern finds. For a carrier that wakes a sleeping machine just by being used |
+| `hours`, `keep_hours` | prints its plan-hours left (a number or `{"left": n}`); it is woken only above `keep_hours` |
+| `can` | what it can do beyond its OS, for `--needs` |
+| `work`, `repos` | the folder that holds its repos, and folders for repos kept somewhere else |
+| `busy_dir` | a folder its idle watch reads for running work |
+| `extra` | handed back with a placement, for the caller (a T3 environment id) |
+
+`ask_seconds` (20) is how long a machine has to answer and `wake_seconds` (280) how long a wake
+may take.
+
+### Hona/mesh
+
+[mesh](https://github.com/Hona/mesh) runs a command on a named device of yours in about 35 ms,
+over SSH on Tailscale, with the devices listed in a private GitHub repo. That makes it a `via`:
+`mesh exec <device>`. It is not a pool by itself. It measures nothing, keeps no line, and every
+command names its device; the choosing is fairshare's. `fairshare pool join --mesh` makes every
+device of the mesh a member and looks again on every pool command, so a machine that runs
+`mesh up` is in the pool from then on with nothing else to do, and one that leaves the mesh
+leaves the pool.
+
+What it needs and cannot do (read from its SPEC and tried with 0.1.0-dev.30 on 2026-11-11):
+
+- Every device needs Tailscale, an SSH server, `gh` and opencode. `mesh up` stops at
+  `tailscale not found` without the first. It sets up opencode (its MCP entry, its `AGENTS.md`),
+  not T3, Claude Code or Codex.
+- It cannot wake a machine: a device that is offline is skipped. A boat host that sleeps still
+  needs its `wake` command, run from a machine signed in to boat.
+- It has no license, so none of its code is in fairshare; fairshare runs the `mesh` program.
+  It is a development build with no tests by its own rule.
+- `mesh exec` ends a command that prints nothing and sits idle for 20 s, so the pool always
+  passes `--no-stall`.
 
 ## Settings
 
