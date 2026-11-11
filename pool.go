@@ -1684,6 +1684,9 @@ func poolStatus(p poolFile, asJSON bool) int {
 			note = "someone is at it"
 		case r.Presence == "away":
 			note = "nobody at it"
+		case r.State == "asleep":
+			// Asleep is a state, not a failure: what its carrier said when asked is not news. Seen
+			// 2026-11-11, on every stopped host's row: "...hen retry. degraded: bx_... gave no exit code".
 		case r.verdict == nil:
 			note = tail(r.Why, 90)
 		}
