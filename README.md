@@ -53,13 +53,12 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
 - **Says why.** A refusal names the numbers: processors in use, threads waiting, the limit and
   what set it, and the busiest programs. Every answer goes to `decisions.jsonl`.
 
-It never runs per command, and changes one thing about another process: once a minute, and when
-the reserve changes, an agent process still held on the processors of a larger reserve gets back
-every processor from the current reserve up. Owl's keeper takes reserved processors away and
-never returns them, and a process hands its set to everything it starts, so without this every
-agent session alive while a game ran stayed on half the PC for good (2026-11-11: 81 processes on
-12 of 24 processors with the reserve at 6). `release_processors` false switches it off; it
-belongs in Owl's keeper and can go when Owl does it. The first fairshare put a hook in
+It never runs per command and never touches another process. Which processors agent work runs
+on is Owl's alone to set: its keeper holds every agent process on exactly the processors from
+the reserve up, wider as well as narrower (owl-go #1138, 2026-11-11). Before that it only
+narrowed, so once the reserve followed the user, agent sessions alive while a game ran stayed
+on 12 of 24 processors; for a few hours the meter widened them itself, and that code is gone.
+If agent work is again short of processors beside idle ones, look there first. The first fairshare put a hook in
 front of every agent command and every process in a Windows job; that cost 130 to 160 ms a call
 and broke commands, and it was removed on 2026-11-08. That code is the tag `v1-final`.
 
@@ -118,7 +117,6 @@ read on every call. None of them is a count of threads.
 | `reserve_window_seconds` | 180 | how far back "used" looks |
 | `reserved_processors` | unset | set it to pin the reserve and switch the measuring off |
 | `sample_seconds` | 5 | how often the meter looks |
-| `release_processors` | true | give agent processes back the processors a smaller reserve freed (Owl only takes them away) |
 | `queue_notify` | unset | the command that tells a thread its launch has room (one JSON notice on stdin) |
 | `queue_place` | unset | the command that picks a machine for a waiting launch that can run on more than this one (`{"entry", "local", "usable"}` on stdin, `{"machine": "<name>"}` on stdout) |
 | `queue_order` | unset | the command that says which waiting launches go first (the line on stdin, a JSON list of ids, front first, on stdout) |
