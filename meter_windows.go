@@ -410,11 +410,6 @@ func processDir(pid uint32) string {
 	return syscall.UTF16ToString(u)
 }
 
-type procKey struct {
-	pid     uint32
-	created uint64
-}
-
 type meter struct {
 	prevIdle, prevTotal []uint64
 	prevCPU             map[procKey]float64
@@ -431,12 +426,23 @@ type meter struct {
 	lastState           string
 	// The urgent hold Owl was last told, and when.
 	yieldSince, yieldAt time.Time
-	// What each agent session (by its runner) used since the last minute was recorded, and the
-	// folder each runner works in.
-	sessCPU, sessSeconds, sessMem map[procKey]float64
-	dirs                          map[procKey]string
-	lastRepos                     time.Time
+	// Which work uses what (work.go), and what was learned from it (learn.go).
+	track tracker
+	known learned
 }
+
+// filetime turns a Windows time (100 ns units since 1601) into a time.
+func filetime(v uint64) time.Time {
+	const toUnix = 116444736000000000
+	if v < toUnix {
+		return time.Time{}
+	}
+	return time.Unix(0, int64(v-toUnix)*100)
+}
+
+// whereWindows says the folder a process runs in. The thread it was started for is not read on
+// Windows, so a process with nothing above it is placed by its folder alone.
+func whereWindows(pid uint32, _ uint64) (dir, thread string) { return processDir(pid), "" }
 
 // look measures the PC once and returns the reading as of now. The first look only sets the
 // counters every later look is measured against, and returns ok false.
@@ -485,7 +491,8 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		} else if !seen && m.prevCPU != nil {
 			used = p.cpu
 		}
-		nodes = append(nodes, procNode{pid: p.pid, parent: p.parent, created: p.created, name: p.name, cores: used, memGB: p.private / (1 << 30)})
+		nodes = append(nodes, procNode{pid: p.pid, parent: p.parent, created: p.created, name: p.name, cores: used, memGB: p.private / (1 << 30),
+			work: p.base <= belowNormalBase && p.pid != 4, started: filetime(p.created), total: p.cpu})
 		if p.base > belowNormalBase || p.pid == 4 {
 			if p.session == m.session && p.session != 0 {
 				userCPU += used
@@ -543,10 +550,10 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 	firm := firmCores(busy, workCPU/seconds, idleCPU/seconds, holding)
 	m.win.add(sample{at: now, seconds: seconds, busy: busy, userBusy: userBusy, waiting: waiting, firm: firm, idleCores: idleCPU / seconds,
 		memAvailGB: memAvail, workCores: workCPU / seconds, programs: programs, others: others}, longWindow)
-	m.measureSessions(s, now, seconds, nodes)
 
 	r := Reading{OS: "windows", At: now.UTC(), Processors: len(idle), Reserved: reserved, Capacity: float64(len(idle) - reserved),
 		MemTotalGB: round2(memTotal), WorkMemGB: round2(workMem / (1 << 30))}
+	r.Work = m.measure(s, now, seconds, nodes, names)
 	r.Machine, _ = os.Hostname()
 	var progCPU, otherCPU map[string]float64
 	var progSeconds float64
@@ -633,7 +640,7 @@ func (m *meter) urgent(s Settings, now time.Time, nodes []procNode) (bool, urgen
 	newer := false
 	for _, n := range nodes {
 		for _, r := range s.Runners {
-			if strings.EqualFold(n.name, r) && n.created >= since {
+			if isRunner(n.name, []string{r}) && n.created >= since {
 				newer = true
 			}
 		}
@@ -656,54 +663,17 @@ func (m *meter) urgent(s Settings, now time.Time, nodes []procNode) (bool, urgen
 	return true, hold
 }
 
-// measureSessions adds each look's processor time to the agent session it belongs to, and once a
-// minute records every session's average under its repo.
-func (m *meter) measureSessions(s Settings, now time.Time, seconds float64, nodes []procNode) {
-	if m.sessCPU == nil {
-		m.sessCPU, m.sessSeconds, m.sessMem, m.dirs = map[procKey]float64{}, map[procKey]float64{}, map[procKey]float64{}, map[procKey]string{}
-		m.lastRepos = now
+// measure puts this look's processes under their work, records what was learned from the pieces
+// that finished a minute or ended, and returns the work open now.
+func (m *meter) measure(s Settings, now time.Time, seconds float64, nodes []procNode, names map[uint32]string) []LiveWork {
+	if m.known == nil {
+		m.known = loadLearned()
 	}
-	runnerOf := sessionOf(nodes, s.Runners)
-	mem := map[procKey]float64{}
-	for i, j := range runnerOf {
-		if j < 0 {
-			continue
-		}
-		k := procKey{nodes[j].pid, nodes[j].created}
-		m.sessCPU[k] += nodes[i].cores
-		mem[k] += nodes[i].memGB
+	alive := func(pid uint32) bool { return strings.HasPrefix(names[pid], "fairshare") }
+	if learnt := m.track.look(now, seconds, nodes, readMarks(alive), whereWindows, s); len(learnt) > 0 {
+		m.known = learn(learnt, now, s)
 	}
-	for k, gb := range mem {
-		m.sessSeconds[k] += seconds
-		m.sessMem[k] = max(m.sessMem[k], gb)
-	}
-	if now.Sub(m.lastRepos) < time.Minute {
-		return
-	}
-	m.lastRepos = now
-	h := loadRepos()
-	alive := map[procKey]bool{}
-	for k, secs := range m.sessSeconds {
-		alive[k] = mem[k] > 0
-		if secs <= 0 {
-			continue
-		}
-		dir, known := m.dirs[k]
-		if !known {
-			dir = processDir(k.pid)
-			m.dirs[k] = dir
-		}
-		h.add(now, secs/60, []sessionUse{{Repo: repoOf(dir), Cores: m.sessCPU[k] / secs, MemGB: m.sessMem[k]}}, int(s.RepoDays)+1)
-	}
-	if err := saveRepos(h); err != nil {
-		fmt.Fprintln(os.Stderr, "degraded: repo measurements not saved:", err)
-	}
-	m.sessCPU, m.sessSeconds, m.sessMem = map[procKey]float64{}, map[procKey]float64{}, map[procKey]float64{}
-	for k := range m.dirs {
-		if !alive[k] {
-			delete(m.dirs, k)
-		}
-	}
+	return m.track.live(now, m.known, s)
 }
 
 // historyLine is what the meter keeps of each minute.

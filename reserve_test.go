@@ -174,3 +174,53 @@ func TestWindowAveragesByTimeAndKeepsTheLeastMemory(t *testing.T) {
 		t.Fatalf("the window kept %d looks", len(w.samples))
 	}
 }
+
+func TestALinuxProcessIsReadWithItsEndedChildrensTime(t *testing.T) {
+	// A name with spaces and brackets, as vitest sets it.
+	p, ok := parsePidStat("103875 (node (vitest) 2) S 103852 103852 103852 0 -1 4194560 100 200 0 0 1500 250 4000 750 20 0 11 0 12345678 9000000 65536 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0")
+	if !ok || p.pid != 103875 || p.parent != 103852 || p.name != "node (vitest) 2" || p.ticks != 6500 || p.start != 12345678 || p.pages != 65536 {
+		t.Fatalf("read %+v %v", p, ok)
+	}
+	for _, bad := range []string{"", "12 (x", "12 (x) S 1 2", "x (y) S 1 1 1 0 -1 0 0 0 0 0 1 1 1 1 0 0 0 0 5 0 7"} {
+		if _, ok := parsePidStat(bad); ok {
+			t.Errorf("%q was read as a process", bad)
+		}
+	}
+	if boot, ok := parseBootTime("cpu  1 2 3\nbtime 1794400000\nprocesses 5\n"); !ok || boot != 1794400000 {
+		t.Fatalf("boot time %v %v", boot, ok)
+	}
+
+	// Two looks. A build shell started compiler jobs that began and ended between them: their
+	// 40 seconds are on the shell's waited-for time. A test worker that was alive at the first
+	// look (30 s counted then) ended with 36: only its last 6 are new.
+	shell, worker, root := procKey{10, 1}, procKey{20, 2}, procKey{1, 0}
+	before := map[procKey]procSeen{root: {seconds: 5}, shell: {seconds: 2, parent: root}, worker: {seconds: 30, parent: shell}}
+	now := map[procKey]procSeen{root: {seconds: 5}, shell: {seconds: 2 + 1 + 40 + 36, parent: root}}
+	carry := map[procKey]float64{}
+	used := usedSince(now, before, carry, false)
+	if used[shell] != 47 || used[root] != 0 || len(carry) != 0 {
+		t.Fatalf("the shell used %.0f, want its own 1, the jobs' 40 and the worker's last 6: %v", used[shell], used)
+	}
+	// The worker is gone before its time lands on the shell: nothing is counted twice, and the
+	// difference is settled in the look in which it lands.
+	early := map[procKey]procSeen{root: {seconds: 5}, shell: {seconds: 3, parent: root}}
+	used = usedSince(early, before, carry, false)
+	if used[shell] != 0 || carry[shell] != -29 {
+		t.Fatalf("read early: used %.0f, carried %.0f", used[shell], carry[shell])
+	}
+	used = usedSince(now, early, carry, false)
+	if used[shell] != 47 || len(carry) != 0 {
+		t.Fatalf("settled a look later: used %.0f, carry %v", used[shell], carry)
+	}
+	// A whole branch that ended is taken off the nearest ancestor still alive.
+	leaf := procKey{30, 3}
+	before[leaf] = procSeen{seconds: 10, parent: worker}
+	gone := map[procKey]procSeen{root: {seconds: 5 + 2 + 30 + 10 + 8}}
+	if used = usedSince(gone, before, map[procKey]float64{}, false); used[root] != 8 {
+		t.Fatalf("after the branch ended the root has %.0f new seconds, want 8", used[root])
+	}
+	// The first look counts nothing: there is nothing to measure it against.
+	if used = usedSince(now, map[procKey]procSeen{}, map[procKey]float64{}, true); len(used) != 0 {
+		t.Fatalf("a first look counted %v", used)
+	}
+}

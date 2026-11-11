@@ -17,6 +17,11 @@ package main
 // A machine that costs plan-hours to keep awake (a boat host) is woken only when no machine that
 // is already awake has room, and never once its plan-hours are down to what the member keeps.
 //
+// What a piece of work takes is each machine's own to say, from what it measured (learn.go). The
+// pool only carries news: what the machine that has measured a piece of work most says it takes
+// is passed to the machines that have measured it little, so a machine that just joined does not
+// count a gate it has never run as next to nothing.
+//
 // Why: Jon, 2026-11-11: "it goes away from this server, that server; it's essentially one place".
 // Until then a launch was placed by a hook that knew each host by its folder, a gate went to the
 // first host or stayed where it started, and a build ran wherever its thread happened to be.
@@ -274,6 +279,9 @@ type errand struct {
 	Commit  string   `json:"commit,omitempty"`
 	BusyDir string   `json:"busy_dir,omitempty"`
 	Login   bool     `json:"login,omitempty"`
+	// Mark is left in the machine's fairshare home while Argv runs, so its meter measures the
+	// run as this run and its room rule counts it for as long as it runs.
+	Mark *runMark `json:"mark,omitempty"`
 }
 
 func (e errand) word() string {
@@ -338,8 +346,11 @@ func (m member) folder(repo string) string {
 
 // work is a piece of work looking for a machine.
 type work struct {
-	Label    string
-	Repo     string
+	Label string
+	Repo  string
+	// Kind is "run" for a command the pool runs and What its name (runName); else a thread.
+	Kind     string
+	What     string
 	Count    int
 	Checkout bool
 	Urgent   bool
@@ -354,9 +365,21 @@ type work struct {
 	Folder bool
 }
 
-// roomArgs is the question for one member: `fairshare room`, as a launch asks it.
-func (w work) roomArgs(m member, take bool) []string {
+// roomArgs is the question for one member: `fairshare room`, as a launch asks it. seen is what
+// another machine measured for this work.
+func (w work) roomArgs(m member, take bool, seen *Sizing) []string {
 	args := []string{"room", "--json", "--count", strconv.Itoa(max(w.Count, 1))}
+	if w.Kind == "run" {
+		args = append(args, "--kind", "run")
+		if w.What != "" {
+			args = append(args, "--what", w.What)
+		}
+	}
+	if seen != nil {
+		if b, err := json.Marshal(seen); err == nil {
+			args = append(args, "--seen", string(b))
+		}
+	}
 	if w.Checkout {
 		args = append(args, "--checkout")
 	}
@@ -412,6 +435,11 @@ type reply struct {
 	Used    float64 `json:"used"`
 	Limit   float64 `json:"limit"`
 	Seconds float64 `json:"seconds"`
+	// Counted is what the work counts as there, in processors, and From what that was learned from.
+	Counted float64 `json:"counted,omitempty"`
+	From    string  `json:"from,omitempty"`
+	// Old says the machine runs a fairshare from before work had a kind, and was asked the old way.
+	Old     bool `json:"old,omitempty"`
 	verdict *Verdict
 }
 
@@ -510,6 +538,7 @@ func read(m member, out, stderr []byte, err error) reply {
 		a.verdict = &v
 		a.Used, a.Limit = round2(v.CPU.Used+v.CPU.Pending), round2(v.CPU.Limit)
 		a.Free = round2(v.CPU.Limit - v.CPU.Used - v.CPU.Pending - v.CPU.Need)
+		a.Counted, a.From = round2(v.CPU.Need), v.Sized.From
 		a.State, a.Why = "full", v.Reason
 		if v.OK {
 			a.State = "room"
@@ -519,22 +548,105 @@ func read(m member, out, stderr []byte, err error) reply {
 }
 
 // askRoom asks one member whether the work fits, and with take counts it there when it does.
-func askRoom(p poolFile, m member, w work, take bool) reply {
+func askRoom(p poolFile, m member, w work, take bool, seen *Sizing) reply {
 	if ok, why := open(m, w); !ok {
 		return reply{Name: m.Name, State: "closed", Why: why}
 	}
 	if m.offline {
 		return reply{Name: m.Name, State: "unreachable", Why: "offline in the mesh"}
 	}
-	e := errand{Args: w.roomArgs(m, take)}
+	e := errand{Args: w.roomArgs(m, take, seen)}
 	if w.Folder {
 		e.Dir = m.folder(w.Repo)
 	}
 	start := time.Now()
 	out, stderr, err := send(p, m, e)
 	a := read(m, out, stderr, err)
+	if a.verdict == nil && strings.Contains(a.Why, "flag provided but not defined") {
+		// A machine still on the build before this one does not know what kind of work it is
+		// asked about. It is asked the old question, and sizes the work the old way.
+		old := w
+		old.Kind, old.What = "", ""
+		e.Args = old.roomArgs(m, take, nil)
+		out, stderr, err = send(p, m, e)
+		a = read(m, out, stderr, err)
+		a.Old = true
+	}
 	a.Seconds = round2(time.Since(start).Seconds())
 	return a
+}
+
+// news is what the machines of the pool measured for each piece of work, kept by the machine
+// that places: for each, the machine that measured it most.
+type news map[string]seenBy
+
+type seenBy struct {
+	Sizing
+	Machine string    `json:"machine"`
+	At      time.Time `json:"at"`
+}
+
+func newsFile() string { return filepath.Join(homeDir(), "seen.json") }
+
+func loadNews() news {
+	n := news{}
+	if b, err := os.ReadFile(newsFile()); err == nil {
+		json.Unmarshal(b, &n)
+	}
+	return n
+}
+
+func saveNews(n news) {
+	b, err := json.Marshal(n)
+	if err != nil || os.MkdirAll(homeDir(), 0o755) != nil {
+		return
+	}
+	tmp := newsFile() + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		os.Rename(tmp, newsFile())
+	}
+}
+
+func (w work) newsKey() string {
+	kind, what := "thread", ""
+	if w.Kind == "run" {
+		kind, what = "run", w.What
+	}
+	if strings.TrimSpace(w.Repo) == "" {
+		return ""
+	}
+	return learnKey(kind, w.Repo, what)
+}
+
+// hear takes in what each machine says it measured for the work: the machine with the most
+// minutes is the one the others are told about, and its own newer word replaces its older.
+// It says whether anything changed.
+func (n news) hear(w work, answers []reply, now time.Time) bool {
+	key := w.newsKey()
+	if key == "" {
+		return false
+	}
+	changed := false
+	for _, a := range answers {
+		if a.verdict == nil || a.verdict.Measured == nil || a.verdict.Measured.Minutes <= 0 {
+			continue
+		}
+		had, known := n[key]
+		if known && had.Machine != a.Name && had.Minutes >= a.verdict.Measured.Minutes && now.Sub(had.At) < 24*time.Hour {
+			continue
+		}
+		n[key] = seenBy{Sizing: *a.verdict.Measured, Machine: a.Name, At: now}
+		changed = true
+	}
+	return changed
+}
+
+// tell is the news about the work for one machine: what another machine measured, never its own.
+func (n news) tell(w work, machine string) *Sizing {
+	if got, ok := n[w.newsKey()]; ok && w.newsKey() != "" && got.Machine != machine {
+		return &got.Sizing
+	}
+	return nil
 }
 
 // askAll asks every member at once.
@@ -622,7 +734,11 @@ type placement struct {
 // wakes it).
 func place(p poolFile, w work, take bool, wake func(member) error) placement {
 	start := time.Now()
-	answers := askAll(p, func(m member) reply { return askRoom(p, m, w, false) })
+	told := loadNews()
+	answers := askAll(p, func(m member) reply { return askRoom(p, m, w, false, told.tell(w, m.Name)) })
+	if told.hear(w, answers, start) {
+		saveNews(told)
+	}
 	done := func(i int, pl placement) placement {
 		pl.Machines, pl.Seconds = answers, round2(time.Since(start).Seconds())
 		if i >= 0 {
@@ -641,7 +757,7 @@ func place(p poolFile, w work, take bool, wake func(member) error) placement {
 			return done(i, placement{})
 		}
 		// The answer that counts is the one that takes it: another launch may have gone in since.
-		if a := askRoom(p, p.Members[i], w, true); a.State == "room" {
+		if a := askRoom(p, p.Members[i], w, true, told.tell(w, p.Members[i].Name)); a.State == "room" {
 			answers[i] = a
 			return done(i, placement{Took: true})
 		} else {
@@ -668,10 +784,10 @@ func place(p poolFile, w work, take bool, wake func(member) error) placement {
 			answers[i].State, answers[i].Why = "unreachable", "did not wake: "+err.Error()
 			continue
 		}
-		a := askRoom(p, m, w, take)
+		a := askRoom(p, m, w, take, told.tell(w, m.Name))
 		for try := 0; try < 3 && (a.State == "asleep" || a.State == "unreachable"); try++ {
 			time.Sleep(5 * time.Second)
-			a = askRoom(p, m, w, take)
+			a = askRoom(p, m, w, take, told.tell(w, m.Name))
 		}
 		if a.State == "asleep" {
 			a.State, a.Why = "unreachable", "woken, and still "+a.Why
@@ -730,7 +846,15 @@ func placeWords(pl placement, answers []reply, picked int) string {
 	case pl.Woke:
 		return fmt.Sprintf("%s was woken and takes it (%.1f processors free there after it): no machine that was awake had room.%s", a.Name, a.Free, rest)
 	}
-	return fmt.Sprintf("%s takes it: %.1f processors are free there after it, the most in the pool.%s", a.Name, a.Free, rest)
+	counted := ""
+	if v := a.verdict; v != nil && v.CPU.Need > 0 {
+		counted = fmt.Sprintf(" There it counts as %.1f processors", v.CPU.Need)
+		if v.Sized.From != "" {
+			counted += ": " + sizedWords(v.Sized)
+		}
+		counted += "."
+	}
+	return fmt.Sprintf("%s takes it: %.1f processors are free there after it, the most in the pool.%s%s", a.Name, a.Free, counted, rest)
 }
 
 // exitOf is the exit for a placement: 0 placed, 1 no machine takes it, 2 cannot tell (a machine
@@ -797,15 +921,19 @@ func workFlags(fs *flag.FlagSet) func() work {
 	count := fs.Int("count", 1, "new threads asked for at once")
 	checkout := fs.Bool("checkout", false, "the work makes a checkout")
 	urgent := fs.Bool("urgent", false, "judge it against the work that would not step aside")
-	cores := fs.Float64("cores", 0, "count it as this many processors")
-	memGB := fs.Float64("mem-gb", 0, "count it as this much memory")
+	cores := fs.Float64("cores", 0, "the caller's guess at its processors, used until work like it is measured")
+	memGB := fs.Float64("mem-gb", 0, "the caller's guess at its memory, used until work like it is measured")
 	diskGB := fs.Float64("disk-gb", 0, "count it as this much disk")
 	threads := fs.String("threads", "", "agent threads open on each machine now: pc=7,host=2")
 	needs := fs.String("needs", "", "what the machine must be or can do: windows,gpu,deploy")
 	among := fs.String("among", "", "the only machines it may go to")
+	run := fs.String("run", "", "the work is a run of this command, for a caller that places it and runs it itself")
 	return func() work {
 		w := work{Label: *label, Repo: *repo, Count: *count, Checkout: *checkout, Urgent: *urgent,
 			Explicit: Need{*cores, *memGB, *diskGB}, Needs: list(*needs), Among: list(*among)}
+		if *run != "" {
+			w.Kind, w.What = "run", runName(strings.Fields(*run))
+		}
 		for name, n := range pairs(*threads) {
 			if v, err := strconv.Atoi(n); err == nil {
 				if w.Threads == nil {
@@ -830,15 +958,19 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
   fairshare pool join --mesh         every device of the mesh (Hona/mesh) joins, and the pool follows the mesh
   fairshare pool leave <name>        a machine leaves
   fairshare pool place [flags]       where a piece of work goes: exit 0 and the machine, 1 the pool is full, 2 cannot tell
-      --repo R --count N --checkout --urgent --cores X --mem-gb X --disk-gb X --label "<what>"
+      --repo R --count N --checkout --urgent --disk-gb X --label "<what>"
+      --cores X --mem-gb X           a guess, used only until work like this is measured: each machine
+                                     counts the work as what it, or another machine of the pool, measured
       --needs windows,deploy         only a machine that is or can do each of these
       --among a,b                    only these machines
-      --take                         count the work on the machine picked until its load shows
+      --run "<command>"              the work is a run of this command, not a thread (pool run says so itself)
+      --take                         count the work on the machine picked until it is seen running
       --no-wake                      name a sleeping machine instead of waking it
       --json
   fairshare pool run [flags] -- <command>
                                      run a command where there is room: in --repo's folder, on --commit when given;
                                      --wait N keeps asking for N minutes. The command's exit, or 69 when the pool failed.
+                                     It counts as what that command was measured using, and for as long as it runs.
 `
 
 func cmdPool(args []string) int {
@@ -1164,6 +1296,7 @@ func poolRun(args []string) int {
 		w.Label = tail(strings.Join(argv, " "), 80)
 	}
 	w.Folder = w.Repo != ""
+	w.Kind, w.What = "run", runName(argv)
 	if *commit != "" && w.Repo == "" {
 		return stop("--commit needs --repo")
 	}
@@ -1187,14 +1320,20 @@ func poolRun(args []string) int {
 	}
 	m := pl.member
 	fmt.Fprintf(os.Stderr, "fairshare: %s (placed in %.1f s)\n", pl.Reason, pl.Seconds)
-	cmd := m.command(context.Background(), errand{Argv: argv, Dir: m.folder(w.Repo), Commit: *commit, BusyDir: m.BusyDir})
+	mark := &runMark{Repo: w.Repo, What: w.What, Label: w.Label}
+	for _, a := range pl.Machines {
+		if a.Name == m.Name && a.verdict != nil {
+			mark.Need = Need{Cores: a.verdict.CPU.Need, MemGB: a.verdict.Mem.Need}
+		}
+	}
+	cmd := m.command(context.Background(), errand{Argv: argv, Dir: m.folder(w.Repo), Commit: *commit, BusyDir: m.BusyDir, Mark: mark})
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	start := time.Now()
 	code := exitCode(cmd.Run())
 	seconds := round2(time.Since(start).Seconds())
 	fmt.Fprintf(os.Stderr, "fairshare: %s ran it in %.1f s, exit %d\n", m.Name, seconds, code)
-	appendLine("decisions.jsonl", map[string]any{"at": time.Now().UTC(), "event": "pool run", "label": w.Label, "repo": w.Repo, "commit": *commit,
-		"machine": m.Name, "woke": pl.Woke, "placed_seconds": pl.Seconds, "seconds": seconds, "exit": code}, 8<<20)
+	appendLine("decisions.jsonl", map[string]any{"at": time.Now().UTC(), "event": "pool run", "label": w.Label, "repo": w.Repo, "what": w.What, "commit": *commit,
+		"counted": mark.Need, "machine": m.Name, "woke": pl.Woke, "placed_seconds": pl.Seconds, "seconds": seconds, "exit": code}, 8<<20)
 	return code
 }
 
@@ -1248,6 +1387,16 @@ func poolHere(word string) int {
 	if len(e.Argv) == 0 {
 		fmt.Fprintln(os.Stderr, "degraded: the errand names nothing to run")
 		return cannotRun
+	}
+	if e.Mark != nil {
+		// Before anything slow (a checkout): the meter should find the mark with the process.
+		mark := *e.Mark
+		mark.PID, mark.At = uint32(os.Getpid()), time.Now().UTC()
+		defer leaveMark(mark)()
+		// The run was let in on a grant; once it has ended it no longer counts as still to come.
+		if s, err := loadSettings(); err == nil {
+			defer endGrant("run", mark.Repo, mark.At, settle(s))
+		}
 	}
 	if e.Commit != "" {
 		tree, err := checkout(dir, e.Commit)

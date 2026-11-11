@@ -18,10 +18,14 @@ const usage = `fairshare: how much room this machine has for agent work, measure
       --threads N                  agent threads open on this machine now (sizes the estimate)
       --count N                    new threads asked for at once (default 1)
       --checkout                   the work makes a checkout, so the disk is checked too
-      --repo NAME                  the repo the thread works in: it counts as that repo's measured sessions
+      --repo NAME                  the repo the work is in: it counts as what that repo's work was measured using
+      --kind thread|run --what "<command>"
+                                   what the work is: a thread (the default), or a run of that command
       --urgent                     judge it against the work that would not step aside, and hold the rest back
                                    (a title holding one of urgent_words is urgent too)
-      --cores X --mem-gb X --disk-gb X   count one new thread as this instead of the estimate
+      --cores X --mem-gb X         the caller's guess: where the estimate starts until work like it is measured
+      --disk-gb X                  count its checkout as this
+      --seen '<json>'              what another machine of the pool measured for this work (the pool passes it)
       --take --label "<what>"      when there is room, count this work until its load shows
       --queue --key K --launcher T --request <file|->
                                    when there is none, keep the launch in the line and tell T when its turn comes
@@ -31,11 +35,11 @@ const usage = `fairshare: how much room this machine has for agent work, measure
   fairshare queue add|claim ...    for a launch that can run on several machines: keep its place, take its turn
   fairshare reading                this machine's reading as JSON
   fairshare history [--hours N]    what the meter saw: how full, how long work waited, the reserve unused
-  fairshare repos                  what a session of each repo was measured using
+  fairshare learned [--json]       what each kind of work was measured using: threads by repo, runs by command
   fairshare pool                   every machine that joined, as one place: what is free, and where a thread fits
   fairshare pool place|run ...     put a piece of work where there is room, without naming a machine ("pool help")
   fairshare settings               the numbers in use and the file they come from
-  fairshare meter                  the meter itself (Windows; install runs it)
+  fairshare meter                  the meter itself (on Windows install runs it; on Linux the first question starts it)
   fairshare install [--uninstall]  make the meter part of this PC (Windows)
 
 Nothing here runs per command or touches another process. It replaced a fixed thread cap.
@@ -60,8 +64,8 @@ func main() {
 		err = cmdHistory(args)
 	case "settings":
 		err = cmdSettings()
-	case "repos":
-		err = cmdRepos(args)
+	case "learned", "repos":
+		err = cmdLearned(args)
 	case "pool":
 		os.Exit(cmdPool(args))
 	case "meter":
@@ -147,6 +151,8 @@ type decision struct {
 	Took    bool      `json:"took"`
 	Label   string    `json:"label,omitempty"`
 	Repo    string    `json:"repo,omitempty"`
+	Kind    string    `json:"kind,omitempty"`
+	What    string    `json:"what,omitempty"`
 	Urgent  bool      `json:"urgent,omitempty"`
 	Machine string    `json:"machine"`
 	Threads int       `json:"threads"`
@@ -154,9 +160,14 @@ type decision struct {
 	CPU     Limit     `json:"cpu"`
 	Mem     Limit     `json:"mem"`
 	Disk    Limit     `json:"disk"`
-	State   string    `json:"presence"`
-	Reason  string    `json:"reason"`
+	// Sized is what the work was counted as and from what, and Open the open work as counted.
+	Sized  Sizing   `json:"sized"`
+	Open   OpenWork `json:"open"`
+	State  string   `json:"presence"`
+	Reason string   `json:"reason"`
 }
+
+func settle(s Settings) time.Duration { return time.Duration(s.SettleMinutes * float64(time.Minute)) }
 
 func cmdRoom(args []string) int {
 	fs := flag.NewFlagSet("room", flag.ExitOnError)
@@ -174,7 +185,10 @@ func cmdRoom(args []string) int {
 	launcher := fs.String("launcher", "", "the thread that asks, told when there is room")
 	request := fs.String("request", "", "the launch exactly as sent (file or -), kept with it in the line")
 	asJSON := fs.Bool("json", false, "print the whole answer as JSON")
-	repo := fs.String("repo", "", "the repo the thread works in")
+	repo := fs.String("repo", "", "the repo the work is in")
+	kind := fs.String("kind", "thread", "what the work is: thread or run")
+	what := fs.String("what", "", "a run's command")
+	seenFlag := fs.String("seen", "", "what another machine of the pool measured for this work, as JSON")
 	urgentFlag := fs.Bool("urgent", false, "judge it against the work that would not step aside")
 	fs.Parse(args)
 
@@ -190,7 +204,23 @@ func cmdRoom(args []string) int {
 		return fail(err)
 	}
 	now := time.Now()
-	ask := Ask{Threads: *threads, Count: *count, Explicit: Need{*cores, *memGB, *diskGB}, Disk: *checkout}
+	if *kind != "run" {
+		*kind, *what = "thread", ""
+	}
+	var seen *Sizing
+	if *seenFlag != "" {
+		var got Sizing
+		if json.Unmarshal([]byte(*seenFlag), &got) != nil {
+			return fail(fmt.Errorf("--seen is not a sizing: %s", *seenFlag))
+		}
+		seen = &got
+	}
+	ask := Ask{Threads: *threads, Count: *count, Explicit: Need{*cores, *memGB, *diskGB}, Disk: *checkout, Kind: *kind}
+	let := grant{Label: *label, Kind: *kind, Repo: *repo, Count: max(*count, 1)}
+	letIn := func(need Need) bool {
+		let.Need = need
+		return takeGrant(now, settle(s), let) == nil
+	}
 	urgent, urgentWhy := isUrgent(*urgentFlag, *label, *repo, s)
 	if *from != "" { // another machine's reading: the rule only, no record and no line
 		r, err := readingFrom(*from)
@@ -204,9 +234,7 @@ func cmdRoom(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	if n, ok := loadRepos().need(*repo, now, s); ok {
-		ask.Repo = &n
-	}
+	ask.Learned = loadLearned().levels(*kind, *repo, *what, seen, now, s)
 	// Only a machine where Owl holds agent work can put other work behind an urgent launch.
 	urgent = urgent && r.OS == "windows"
 	var body []byte
@@ -215,7 +243,6 @@ func cmdRoom(args []string) int {
 	} else if *request != "" {
 		body, _ = os.ReadFile(*request)
 	}
-	settle := time.Duration(s.SettleMinutes * float64(time.Minute))
 	var v Verdict
 	took := false
 	err = withLock(func() error {
@@ -231,7 +258,7 @@ func cmdRoom(args []string) int {
 			if err := saveQueue(q); err != nil {
 				return err
 			}
-			took = takeGrant(now, settle, need, *label) == nil
+			took = letIn(need)
 			return nil
 		}
 		if urgent && (*key == "" || held == nil) {
@@ -242,7 +269,7 @@ func cmdRoom(args []string) int {
 			standing = standing && now.Before(hold.Last.Add(minutes(s.UrgentMostMinutes)))
 			var since Need
 			if standing {
-				since = pendingSinceNeed(now, settle, hold.Since)
+				since = pendingSinceNeed(now, settle(s), hold.Since)
 			}
 			ua := ask
 			ua.Urgent = true
@@ -251,7 +278,7 @@ func cmdRoom(args []string) int {
 			if !v.OK || !*take {
 				return nil
 			}
-			took = takeGrant(now, settle, Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, *label) == nil
+			took = letIn(Need{v.CPU.Need, v.Mem.Need, v.Disk.Need})
 			hold = hold.join(now, *label, standing)
 			if err := saveUrgent(hold); err != nil {
 				v.Reason += " degraded: the hold was not recorded: " + err.Error()
@@ -263,7 +290,7 @@ func cmdRoom(args []string) int {
 			return nil
 		}
 		// A new arrival passes the line only when there is room for everyone in it too.
-		v = decideBehind(r, s, ask, pendingNeed(now, settle), lineNeed(q, false))
+		v = decideBehind(r, s, ask, pendingNeed(now, settle(s), r.Work), lineNeed(q, false))
 		if *key != "" && held != nil {
 			v.OK = false
 			v.Reason = fmt.Sprintf("%s: this launch is already in the line, place %d of %d, waiting %.0f minutes. It is not lost: fairshare tells %s the moment there is room, and it goes in then. Do not send it again before that.",
@@ -272,7 +299,7 @@ func cmdRoom(args []string) int {
 		}
 		if v.OK {
 			if *take {
-				took = takeGrant(now, settle, Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, *label) == nil
+				took = letIn(Need{v.CPU.Need, v.Mem.Need, v.Disk.Need})
 			}
 			return nil
 		}
@@ -280,7 +307,7 @@ func cmdRoom(args []string) int {
 			return nil
 		}
 		q, _, _ = join(q, queued{Key: *key, Launcher: *launcher, Title: *label, Threads: *threads, Count: max(*count, 1), Checkout: *checkout,
-			Repo: *repo, RepoNeed: ask.Repo, Need: Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, QueuedAt: now}, body)
+			Repo: *repo, Need: Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, QueuedAt: now}, body)
 		if err := saveQueue(q); err != nil {
 			return err
 		}
@@ -293,8 +320,9 @@ func cmdRoom(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	appendLine("decisions.jsonl", decision{At: now.UTC(), OK: v.OK, Took: took, Label: *label, Repo: *repo, Urgent: v.Urgent, Machine: v.Machine, Threads: v.Threads,
-		Count: v.Count, CPU: v.CPU, Mem: v.Mem, Disk: v.Disk, State: r.Presence.State, Reason: v.Reason}, 8<<20)
+	v.Measured = measured(ask.Learned, r.Machine)
+	appendLine("decisions.jsonl", decision{At: now.UTC(), OK: v.OK, Took: took, Label: *label, Repo: *repo, Kind: *kind, What: *what, Urgent: v.Urgent, Machine: v.Machine, Threads: v.Threads,
+		Count: v.Count, CPU: v.CPU, Mem: v.Mem, Disk: v.Disk, Sized: v.Sized, Open: v.Open, State: r.Presence.State, Reason: v.Reason}, 8<<20)
 	return answer(v, *asJSON)
 }
 
@@ -323,8 +351,8 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	settle := time.Duration(s.SettleMinutes * float64(time.Minute))
-	v := decide(r, s, Ask{Threads: *threads, Count: 1, Disk: true}, pendingNeed(time.Now(), settle))
+	now := time.Now()
+	v := decide(r, s, Ask{Threads: *threads, Count: 1, Disk: true, Learned: loadLearned().levels("thread", "", "", nil, now, s)}, pendingNeed(now, settle(s), r.Work))
 	if *asJSON {
 		return printJSON(v)
 	}
@@ -360,8 +388,18 @@ func statusText(v Verdict, s Settings) string {
 	}
 	row("memory", fmt.Sprintf("%.1f of %.0f GB free, %.1f kept free", r.MemAvailGB, r.MemTotalGB, r.MemTotalGB*s.MemReserveFraction))
 	row("disk", fmt.Sprintf("%.1f GB free on %s, %.0f kept free", r.DiskFreeGB, r.DiskPath, s.DiskReserveGB))
+	if v.Open.Pieces > 0 {
+		text := fmt.Sprintf("%d pieces, using %.1f processors this minute, expected to use %.1f", v.Open.Pieces, v.Open.Now, v.Open.Expect)
+		if v.Open.Pieces == 1 {
+			text = fmt.Sprintf("1 piece, using %.1f processors this minute, expected to use %.1f", v.Open.Now, v.Open.Expect)
+		}
+		if v.Open.Swing >= 0.1 {
+			text += fmt.Sprintf(" give or take %.1f", v.Open.Swing)
+		}
+		row("open work", fmt.Sprintf("%s; counted as %.1f in use", text, v.CPU.Used))
+	}
 	if v.CPU.Pending > 0 {
-		row("just let in", fmt.Sprintf("counted as %.1f processors and %.1f GB until their load shows", v.CPU.Pending, v.Mem.Pending))
+		row("just let in", fmt.Sprintf("counted as %.1f processors until it is seen running", v.CPU.Pending))
 	}
 	if len(r.Others) > 0 {
 		row("everything else", programWords(r.Others, 5))
@@ -372,6 +410,16 @@ func statusText(v Verdict, s Settings) string {
 	}
 	if q := loadQueue(); len(q) > 0 {
 		row("in the line", fmt.Sprintf("%d launches wait for room, the first for %.0f minutes (`fairshare queue`)", len(q), time.Since(q[0].QueuedAt).Minutes()))
+	}
+	if len(r.Work) > 0 {
+		fmt.Fprintf(&b, "\n  open work (processors now, expected, give or take; GB now, expected; its own minutes):\n")
+		for i, w := range r.Work {
+			if i == 12 {
+				fmt.Fprintf(&b, "    and %d more\n", len(r.Work)-i)
+				break
+			}
+			fmt.Fprintf(&b, "    %-52.52s %5.1f %5.1f %5.1f  %5.1f %5.1f  %5.0f\n", workWords(w), w.Now, w.Expect, w.Swing, w.MemGB, w.ExpectMemGB, w.Minutes)
+		}
 	}
 	if len(r.Programs) > 0 {
 		fmt.Fprintf(&b, "\n  agent work by program, last %s (processors, GB):\n", span(r.ShortSeconds))
@@ -386,32 +434,37 @@ func statusText(v Verdict, s Settings) string {
 	return b.String()
 }
 
-func cmdRepos(args []string) error {
-	fs := flag.NewFlagSet("repos", flag.ExitOnError)
+func cmdLearned(args []string) error {
+	fs := flag.NewFlagSet("learned", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print as JSON")
 	fs.Parse(args)
 	s, err := loadSettings()
 	if err != nil {
 		return err
 	}
-	t := loadRepos().table(time.Now(), s)
+	t := loadLearned().table(time.Now(), s)
 	if *asJSON {
-		if t == nil {
-			t = []repoNeed{}
-		}
 		return printJSON(t)
 	}
 	if len(t) == 0 {
-		fmt.Println("No session has been measured yet: the meter measures each repo's sessions once a minute (Windows).")
+		fmt.Println("Nothing has been measured yet: the meter records what each thread, run and job uses once a minute.")
 		return nil
 	}
-	fmt.Printf("A session of each repo over the last %.0f days (processors, GB, session-minutes); %.0f minutes replace the machine's average:\n", s.RepoDays, s.RepoMinMinutes)
+	fmt.Printf("What work was measured using here. Minutes fade by half every %.0f days; %.0f minutes weigh as much as everything wider.\n", s.LearnHalfLifeDays, s.LearnTrustMinutes)
+	fmt.Printf("\n  %-58s %6s %6s %6s %8s %6s %8s\n", "WORK", "PROC", "+/-", "GB", "MINUTES", "ENDED", "LASTS")
 	for _, n := range t {
-		used := ""
-		if n.Minutes < s.RepoMinMinutes {
-			used = "  (not enough yet)"
+		name := map[string]string{"thread": "every thread", "run": "every run", "job": "every job outside a thread"}[n.Kind]
+		switch {
+		case n.What != "":
+			name = fmt.Sprintf("%s in %s: %s", strings.TrimSuffix(kindWords(n.Kind), "s"), n.Repo, n.What)
+		case n.Repo != "":
+			name = fmt.Sprintf("%s in %s", kindWords(n.Kind), n.Repo)
 		}
-		fmt.Printf("  %-28.28s %5.1f %6.1f %8.0f%s\n", n.Repo, n.Cores, n.MemGB, n.Minutes, used)
+		took := "-"
+		if n.Seconds >= 1 && n.Kind == "run" {
+			took = lasts(n.Seconds)
+		}
+		fmt.Printf("  %-58.58s %6.1f %6.1f %6.1f %8.0f %6.0f %8s\n", name, n.Cores, n.Swing, n.MemGB, n.Minutes, n.Works, took)
 	}
 	return nil
 }

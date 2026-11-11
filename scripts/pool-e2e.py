@@ -4,7 +4,7 @@
 # for Hona/mesh that prints what mesh's SPEC says it prints. Readings are written by hand so "full"
 # and "room" are certain whatever this machine is doing.
 # Usage: python -I pool-e2e.py <fairshare program>      (Windows and Linux)
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile, time
 from datetime import datetime, timezone
 
 exe = os.path.abspath(sys.argv[1])
@@ -66,9 +66,13 @@ def stamp():
         json.dump(r, open(os.path.join(home[name], "reading.json"), "w"))
 
 
+def env_of(at):
+    return dict(os.environ, FAIRSHARE_HOME=home[at], FAIRSHARE_READING=os.path.join(home[at], "reading.json"), FAIRSHARE_METER="off")
+
+
 def fs(*args, at="pc"):
     stamp()
-    env = dict(os.environ, FAIRSHARE_HOME=home[at], FAIRSHARE_READING=os.path.join(home[at], "reading.json"))
+    env = env_of(at)
     done = subprocess.run([exe, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
     return done.returncode, done.stdout.strip(), done.stderr.strip()
 
@@ -212,6 +216,71 @@ record = [json.loads(l) for l in lines(os.path.join(home["pc"], "decisions.jsonl
 runs = [r for r in record if r.get("event") == "pool run"]
 check("every placement and run is on the record, with how long each took", len(runs) == 4 and runs[-1]["machine"] == "host-a" and runs[-1]["commit"] == first
       and all("seconds" in r for r in record if r.get("event") == "pool place"), runs)
+
+# What work takes is learned, each machine's own, and the pool passes it on. host-a has run this
+# repo's gate for an hour at 6 processors; the PC has never run it.
+gate = "bun run gate"
+hour = {"at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "minutes": 60, "cores": 360, "sq": 2160, "mem_gb": 300, "mem_peak": 5, "works": 12, "seconds": 3600}
+json.dump({"run|demo|" + gate: hour, "run|demo|": hour, "run||": hour}, open(os.path.join(home["host-a"], "learned.json"), "w"))
+reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
+reading("host-a", 0.5)
+code, pl, raw = placed("--repo", "demo", "--run", gate)
+m = {x["name"]: x for x in pl.get("machines", [])}
+check("a run counts on each machine as what that machine measured for the command: 6 processors where it ran, the floor where it never did",
+      code == 0 and 5.8 <= m["host-a"].get("counted", 0) <= 6.6 and "`bun run gate` in demo here" in m["host-a"].get("from", "") and m["pc"].get("counted") == 1.0, raw)
+code, pl, raw = placed("--repo", "demo", "--run", gate)
+m = {x["name"]: x for x in pl.get("machines", [])}
+check("the pool passes it on: the PC, which never ran it, now counts it as what the host measured", code == 0 and m["pc"].get("counted", 0) >= 4
+      and "on host-a" in m["pc"].get("from", "") and "there it counts as" in pl.get("reason", "").lower(), raw)
+code, pl, raw = placed("--repo", "demo", "--run", "bun run lint")
+m = {x["name"]: x for x in pl.get("machines", [])}
+check("another command of the repo is other work: the PC is told nothing about it", code == 0 and m["pc"].get("counted") == 1.0, raw)
+code, pl, raw = placed("--repo", "demo", "--run", gate, "--cores", "1", "--among", "host-a")
+m = {x["name"]: x for x in pl.get("machines", [])}
+check("a caller's own `--cores 1` does not replace an hour of measurement", code == 0 and m["host-a"].get("counted", 0) >= 5.5, raw)
+code, pl, raw = placed("--repo", "nowhere-measured", "--run", "make all", "--cores", "3", "--among", "pc")
+m = {x["name"]: x for x in pl.get("machines", [])}
+check("and stands only where nothing like the work was ever measured", code == 0 and m["pc"].get("counted") == 3.0, raw)
+if os.name != "nt":
+    # A run counts for as long as it runs, not for a set time (a machine without a meter knows
+    # its runs by the marks they leave; on Windows the meter follows the mark).
+    before = json.loads(fs("status", "--json", at="host-a")[1])["cpu"]["pending"]
+    going = subprocess.Popen([exe, "pool", "run", "--repo", "demo", "--among", "host-a", "--", py, "-c", "import time; time.sleep(4)"],
+                             env=env_of("pc"), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    code, out, err = fs("status", "--json", at="host-a")
+    st = json.loads(out) if out.startswith("{") else {}
+    work = st.get("reading", {}).get("work", [])
+    check("while a run runs its machine counts it as open work, not as a launch still to come", len(work) == 1 and work[0]["kind"] == "run"
+          and work[0]["repo"] == "demo" and st["open"]["pieces"] == 1 and st["cpu"]["pending"] == before, str(work) + str(st.get("cpu")) + err)
+    going.wait()
+    code, out, err = fs("status", "--json", at="host-a")
+    st = json.loads(out) if out.startswith("{") else {}
+    check("and once it ended it counts as nothing: no open work, no mark, no grant left behind", going.returncode == 0 and not st.get("reading", {}).get("work")
+          and st["cpu"]["pending"] == before and os.listdir(os.path.join(home["host-a"], "marks")) == [], str(st.get("cpu")) + err)
+# A machine still on the fairshare from before work had a kind is asked the old question.
+old = os.path.join(root, "old-via.py")
+open(old, "w").write(
+    "import json, os, subprocess, sys\n"
+    "args = json.loads(bytes.fromhex(sys.argv[-1])).get('args', [])\n"
+    "if '--kind' in args or '--seen' in args:\n"
+    "    sys.stderr.write('flag provided but not defined: -kind\\nUsage of room:\\n'); sys.exit(2)\n"
+    "sys.exit(subprocess.run([sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'via.py')] + sys.argv[1:]).returncode)\n")
+pool = json.load(open(os.path.join(home["pc"], "pool.json")))
+kept_via = [m for m in pool["members"] if m["name"] == "host-a"][0]["via"]
+for member in pool["members"]:
+    if member["name"] == "host-a":
+        member["via"] = [py, "-I", old, home["host-a"]]
+json.dump(pool, open(os.path.join(home["pc"], "pool.json"), "w"))
+code, pl, raw = placed("--repo", "demo", "--run", gate, "--among", "host-a")
+m = {x["name"]: x for x in pl.get("machines", [])}
+check("a machine on the build before this one still answers: it is asked the old way", code == 0 and pl.get("machine") == "host-a" and m["host-a"].get("old") is True, raw)
+for member in pool["members"]:
+    if member["name"] == "host-a":
+        member["via"] = kept_via
+json.dump(pool, open(os.path.join(home["pc"], "pool.json"), "w"))
+reading("pc", 17.9, processors=24, reserved=4, state="active", system="windows")
+reading("host-a", 7.9)
 
 # A machine that cannot tell is not a machine that is full.
 readings.pop("pc")

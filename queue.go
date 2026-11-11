@@ -49,10 +49,10 @@ type queued struct {
 	Threads  int    `json:"threads"`
 	Count    int    `json:"count"`
 	Checkout bool   `json:"checkout"`
-	// Repo is the repo it works in, and RepoNeed what that repo's sessions were measured using
-	// when it joined; it counts as that rather than the machine's average.
-	Repo     string    `json:"repo,omitempty"`
-	RepoNeed *repoNeed `json:"repo_need,omitempty"`
+	// Repo is the repo it works in: it counts as what that repo's threads are measured using, as
+	// of the look that judges it (learned is filled in then).
+	Repo    string `json:"repo,omitempty"`
+	learned []level
 	// Machines are the machines it can run on, by name; none means only this one.
 	Machines []string `json:"machines,omitempty"`
 	// Need is what it counted as on this machine when it joined, and again when it was offered room.
@@ -210,7 +210,7 @@ func advance(q []queued, r Reading, s Settings, now time.Time, granted Need, pla
 		}
 		var local *Verdict
 		if slices.Contains(usable, here) {
-			v := decide(r, s, Ask{Threads: q[i].Threads, Count: q[i].Count, Disk: q[i].Checkout, Repo: q[i].RepoNeed}, granted.plus(lineNeed(q, true)))
+			v := decide(r, s, Ask{Threads: q[i].Threads, Count: q[i].Count, Disk: q[i].Checkout, Learned: q[i].learned}, granted.plus(lineNeed(q, true)))
 			local = &v
 		}
 		if local != nil {
@@ -417,8 +417,12 @@ func moveLine(r Reading, s Settings, now time.Time) {
 			if len(q) == 0 {
 				return nil
 			}
-			settle := time.Duration(s.SettleMinutes * float64(time.Minute))
-			after, told := advance(q, r, s, now, pendingNeed(now, settle), place)
+			// Each waiting launch is sized by what its repo\'s threads are measured using now.
+			known := loadLearned()
+			for i := range q {
+				q[i].learned = known.levels("thread", q[i].Repo, "", nil, now, s)
+			}
+			after, told := advance(q, r, s, now, pendingNeed(now, settle(s), r.Work), place)
 			notices = append(notices, told...)
 			return saveQueue(after)
 		})
@@ -526,16 +530,15 @@ func cmdQueue(args []string) error {
 			return err
 		}
 		e := queued{Key: *key, Launcher: *launcher, Title: *label, Threads: *threads, Count: max(*count, 1), Checkout: *checkout, Repo: *repo, QueuedAt: time.Now()}
-		if n, ok := loadRepos().need(*repo, e.QueuedAt, s); ok {
-			e.RepoNeed = &n
-		}
+		e.learned = loadLearned().levels("thread", *repo, "", nil, e.QueuedAt, s)
 		for _, m := range strings.Split(*machines, ",") {
 			if m = strings.TrimSpace(m); m != "" {
 				e.Machines = append(e.Machines, m)
 			}
 		}
 		if r, err := currentReading(s); err == nil {
-			e.Need = estimate(r, s, Ask{Threads: e.Threads, Count: e.Count, Disk: e.Checkout, Repo: e.RepoNeed}).times(e.Count)
+			one, _ := estimate(r, s, Ask{Threads: e.Threads, Count: e.Count, Disk: e.Checkout, Learned: e.learned})
+			e.Need = one.times(e.Count)
 		}
 		return withLock(func() error {
 			q, at, added := join(loadQueue(), e, body)
@@ -572,7 +575,7 @@ func cmdQueue(args []string) error {
 			}
 			if got.Machine == "" || got.Machine == here {
 				s, _ := loadSettings()
-				takeGrant(time.Now(), time.Duration(s.SettleMinutes*float64(time.Minute)), got.Need, got.Title)
+				takeGrant(time.Now(), settle(s), grant{Need: got.Need, Label: got.Title, Repo: got.Repo, Count: got.Count})
 			}
 			appendLine("decisions.jsonl", map[string]any{"at": time.Now().UTC(), "event": "claimed", "id": got.ID, "title": got.Title,
 				"machine": got.Machine, "waited_minutes": time.Since(got.QueuedAt).Minutes()}, 8<<20)
