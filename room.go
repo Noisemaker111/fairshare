@@ -16,8 +16,10 @@ package main
 // before each runs a gate are not an idle machine. And because open work does not all peak in the
 // same minute, room is kept for its swing taken together (the spreads add as squares), not for
 // every piece's peak: a steady build needs its average, a bursty thread needs more than its
-// average, ten bursty threads need far less than ten peaks. Work let in a moment ago counts at
-// its estimate only until the meter sees it running, and then as itself.
+// average, ten bursty threads need far less than ten peaks. Memory is judged the same way and
+// not by adding up the most each piece ever held: the open work counts as what it is expected to
+// hold, with room kept once for it to hold more (memLoad, work.go). Work let in a moment ago
+// counts at its estimate only until the meter sees it running, and then as itself.
 
 import (
 	"fmt"
@@ -87,6 +89,11 @@ type OpenWork struct {
 	Swing  float64 `json:"swing"`
 	// Rest is the processors in use that belong to no piece of work.
 	Rest float64 `json:"rest"`
+	// MemGB is the memory the pieces hold now, MemExpect what they are expected to hold, and
+	// MemKept what is kept free above that for when they hold more (memLoad.kept).
+	MemGB     float64 `json:"mem_gb"`
+	MemExpect float64 `json:"mem_expect"`
+	MemKept   float64 `json:"mem_kept"`
 }
 
 // Desk says whether work that drives the desktop may start, and why not.
@@ -183,7 +190,8 @@ func estimate(r Reading, s Settings, a Ask) (Need, Sizing) {
 	// holding most of a bigger machine's memory is not refused here for ever.
 	sz.Cores = math.Min(sz.Cores, r.Capacity)
 	sz.Swing = math.Min(sz.Swing, r.Capacity-sz.Cores)
-	sz.MemGB = math.Min(sz.MemGB, r.MemTotalGB/2)
+	sz.MemMost = math.Min(sz.MemMost, r.MemTotalGB/2)
+	sz.MemGB = math.Min(sz.MemGB, sz.MemMost)
 	n := Need{Cores: sz.Cores, MemGB: sz.MemGB}
 	if a.Disk {
 		n.DiskGB = s.ThreadDiskGB
@@ -211,11 +219,12 @@ func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 	target := cpuTarget(r, s)
 	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r, Line: line, Urgent: a.Urgent, Sized: sz}
 	v.Sized.Cores, v.Sized.Swing, v.Sized.MemGB = round2(sz.Cores), round2(sz.Swing), round2(sz.MemGB)
+	v.Sized.MemSwing, v.Sized.MemMost = round2(sz.MemSwing), round2(sz.MemMost)
 
 	// What is counted as in use: the processors busy over the short and the long window, and
 	// what the open work is expected to use with room for its swing, whichever is most.
 	busy := math.Max(r.DemandShort, r.DemandLong)
-	now, expect, swingSq, memOwed := openWork(r.Work)
+	now, expect, swingSq, mem := openWork(r.Work)
 	rest := math.Max(0, r.DemandShort-now)
 	v.Open = OpenWork{Pieces: len(r.Work), Now: round2(now), Expect: round2(expect), Swing: round2(math.Sqrt(swingSq)), Rest: round2(rest)}
 	used := math.Max(busy, rest+expect+s.LearnMargin*math.Sqrt(swingSq))
@@ -224,14 +233,26 @@ func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 		// The open work steps aside for it, so only what would not is counted.
 		used = math.Max(r.FirmShort, r.FirmLong)
 		after = used + need.Cores
-		memOwed = 0
+		mem = memLoad{}
 	}
 	v.CPU = Limit{Used: used, Pending: pending.Cores, Need: after - used, Limit: r.Capacity * target, Unit: "processors"}
 	v.CPU.OK = used+pending.Cores+v.CPU.Need <= v.CPU.Limit+1e-9
 
+	// Memory the same way. What counts as taken is what is in use now, and on top of it whatever
+	// the open work is expected to hold, with room for it to hold more (memLoad.kept), beyond
+	// what it holds already. The new work adds what it is expected to hold and whatever more has
+	// to be kept once it is one of them. It is the difference that is added, never the pieces'
+	// memory taken off the machine's: a piece's memory counts shared pages more than once, so the
+	// pieces can add up to more than the machine has in use.
+	memUsed := r.MemTotalGB - r.MemAvailGB
+	memTaken := memUsed + math.Max(0, mem.expect+mem.kept(s.LearnMemMargin)-mem.held)
+	with := mem
+	with.add(0, sz.MemGB, sz.MemSwing, sz.MemMost, a.Count)
+	memAfter := memUsed + math.Max(need.MemGB, with.expect+with.kept(s.LearnMemMargin)-mem.held)
+	v.Open.MemGB, v.Open.MemExpect, v.Open.MemKept = round2(mem.held), round2(mem.expect), round2(mem.kept(s.LearnMemMargin))
 	reserve := r.MemTotalGB * s.MemReserveFraction
-	v.Mem = Limit{Used: r.MemTotalGB - r.MemAvailGB, Pending: pending.MemGB + memOwed, Need: need.MemGB, Limit: r.MemTotalGB - reserve, Unit: "GB of memory"}
-	v.Mem.OK = v.Mem.Used+v.Mem.Pending+need.MemGB <= v.Mem.Limit+1e-9
+	v.Mem = Limit{Used: memUsed, Pending: pending.MemGB + memTaken - memUsed, Need: memAfter - memTaken, Limit: r.MemTotalGB - reserve, Unit: "GB of memory"}
+	v.Mem.OK = v.Mem.Used+v.Mem.Pending+v.Mem.Need <= v.Mem.Limit+1e-9
 
 	v.Disk = Limit{OK: true, Pending: pending.DiskGB, Need: need.DiskGB, Limit: r.DiskFreeGB - s.DiskReserveGB, Unit: "GB of disk"}
 	if a.Disk {
@@ -290,6 +311,26 @@ func openWords(v Verdict) string {
 		text += fmt.Sprintf(", beside %.1f that is no piece of work", v.Open.Rest)
 	}
 	return text + fmt.Sprintf(": counted as %.1f in use.", v.CPU.Used)
+}
+
+// openMemWords says what the open work's memory was counted as, when that is more than it holds.
+func openMemWords(v Verdict) string {
+	o := v.Open
+	if v.Urgent || o.Pieces == 0 || o.MemExpect+o.MemKept <= o.MemGB+0.05 {
+		return ""
+	}
+	text := fmt.Sprintf(" The %d pieces of work open here hold %.1f GB and are expected to hold %.1f", o.Pieces, o.MemGB, o.MemExpect)
+	if o.Pieces == 1 {
+		text = fmt.Sprintf(" The one piece of work open here holds %.1f GB and is expected to hold %.1f", o.MemGB, o.MemExpect)
+	}
+	if o.MemKept >= 0.1 {
+		if o.Pieces > 1 {
+			text += fmt.Sprintf(", with %.1f kept for when they hold more (never every piece at its most at once)", o.MemKept)
+		} else {
+			text += fmt.Sprintf(", with %.1f kept for when it holds more", o.MemKept)
+		}
+	}
+	return text + "."
 }
 
 func reason(v Verdict, s Settings, a Ask) string {
@@ -355,10 +396,14 @@ func reason(v Verdict, s Settings, a Ask) string {
 	if !v.Mem.OK {
 		fmt.Fprintf(&b, " %.1f GB of %.0f GB of memory is free, %.1f GB is kept free, and %s counts as %.1f GB",
 			r.MemAvailGB, r.MemTotalGB, r.MemTotalGB*s.MemReserveFraction, what, v.Mem.Need)
+		if more := v.Mem.Need - v.Sized.MemGB*float64(v.Count); more >= 0.1 {
+			fmt.Fprintf(&b, " (%.1f expected and %.1f for how far it reaches above that)", v.Sized.MemGB*float64(v.Count), more)
+		}
 		if v.Mem.Pending > 0 {
 			fmt.Fprintf(&b, " on top of %.1f GB that work let in or open here is still expected to take", v.Mem.Pending)
 		}
 		b.WriteString(".")
+		b.WriteString(openMemWords(v))
 	}
 	if !v.Disk.OK {
 		fmt.Fprintf(&b, " %s has %.1f GB free, %.0f GB is kept free, and %s with a checkout counts as %.0f GB",

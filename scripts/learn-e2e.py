@@ -5,7 +5,7 @@
 # used, so the checks mean the same on a PC that is full as on one that is idle (2026-11-11: on a
 # PC with 20 of its 22 processors busy a two-process burner really got 1.28, and a check that
 # wanted "about 2" failed a meter that was right).
-# Usage: python -I learn-e2e.py <fairshare program>      (Linux and Windows; about a minute)
+# Usage: python -I learn-e2e.py <fairshare program>      (Linux and Windows; about two minutes)
 # To see it fail: LEARN_E2E_BREAK=1 keeps the meter from starting, and the checks on what was
 # measured fail.
 import json, os, shutil, subprocess, sys, tempfile, time
@@ -53,6 +53,35 @@ def burned():
         except (OSError, ValueError):
             pass
     return total
+
+
+# hold.py <MB> <seconds> <seconds>: holds that much memory for the first stretch, gives it back,
+# idles for the second, and writes down the most it itself held, as the system counts it for the
+# process: resident memory on Linux, private memory on Windows, which is what each meter reads.
+hold = os.path.join(root, "hold.py")
+held_file = os.path.join(root, "held")
+open(hold, "w").write(
+    "import os, sys, time\n"
+    "block = bytearray(int(sys.argv[1]) << 20)\n"
+    "for i in range(0, len(block), 4096): block[i] = 1\n"
+    "time.sleep(float(sys.argv[2]))\n"
+    "most = len(block) / 2**30\n"
+    "try:\n"
+    "    if os.name == 'nt':\n"
+    "        import ctypes, ctypes.wintypes as w\n"
+    "        class Counters(ctypes.Structure):\n"
+    "            _fields_ = [('cb', w.DWORD), ('faults', w.DWORD)] + [(n, ctypes.c_size_t) for n in ('peak_set', 'set', 'a', 'b', 'c', 'd', 'private', 'peak_private')]\n"
+    "        c = Counters(); c.cb = ctypes.sizeof(c)\n"
+    "        ctypes.windll.kernel32.GetCurrentProcess.restype = w.HANDLE\n"
+    "        ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD]\n"
+    "        if ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.windll.kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb): most = c.peak_private / 2**30\n"
+    "    else:\n"
+    "        import resource\n"
+    "        most = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20\n"
+    "except Exception: pass\n"
+    "del block\n"
+    "open(r'%s', 'w').write(str(most))\n"
+    "time.sleep(float(sys.argv[3]))\n" % held_file)
 repo = os.path.join(root, "work", "demo")
 tree = os.path.join(root, ".t3", "worktrees", "demo", "feature-x")
 os.makedirs(repo)
@@ -144,6 +173,12 @@ try:
           got and "burn.py 2 12` in demo here" in me.get("from", "") and 0.8 * got["cores"] <= me.get("counted", 0) < (got["cores"] + 7) / 2, out + err)
     check("and a run that ended leaves nothing counted: no mark, no grant", until(lambda: os.listdir(os.path.join(home, "marks")) == [] and status()["cpu"]["pending"] == 0), status().get("cpu"))
 
+    # Memory, on a real process: a run that holds 300 MB for ten seconds and next to nothing for
+    # the hundred after. It goes on beside the checks below and is read when it has ended.
+    holding = subprocess.Popen([exe, "pool", "run", "--repo", "demo", "--wait", "3", "--", py, hold, "300", "10", "100"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    held_now = until(lambda: [w for w in status().get("reading", {}).get("work", []) if w["kind"] == "run" and "hold.py" in w.get("what", "") and w["mem_gb"] >= 0.25] or holding.poll() is not None, 200)
+    check("a run that holds 300 MB is seen holding it", isinstance(held_now, list) and held_now, status().get("reading", {}).get("work"))
+
     # The rule for work that drives the desktop, asked of this machine as it is now.
     code, out, err = fs("room", "--kind", "run", "--desktop", "--json")
     v = json.loads(out) if out.startswith("{") else {}
@@ -173,6 +208,26 @@ try:
         v = json.loads(out) if out.startswith("{") else {}
         check("so a new thread of that repo counts as what its threads were measured using", code == 0 and v.get("sized", {}).get("from") == "demo threads here"
               and v["cpu"]["need"] >= 0.5 and "demo threads here were measured at" in v.get("reason", ""), out + err)
+
+    # What the run that held memory was learned as: three numbers, not one. It held its most for a
+    # tenth of its time, so a minute of it holds far less on average than its most.
+    holding.communicate()
+    got = until(lambda: (lambda r: r if r and r["works"] >= 1 else None)(row("run", "hold.py 300 10 100")), 20)
+    try:
+        said = float(open(held_file).read())
+    except (OSError, ValueError):
+        said = 0.0
+    check("the most it was learned to hold is what the process itself says it held (%.2f GB; the meter counted %.2f)" % (said, got["mem_most"] if got else 0),
+          got and said >= 0.29 and 0.9 * said <= got["mem_most"] <= said + 0.2, got or learned())
+    check("and what it is expected to hold is its average over its minutes (%.2f GB, give or take %.2f), not its most" % ((got["mem_gb"], got["mem_swing"]) if got else (0, 0)),
+          got and got["mem_gb"] <= 0.8 * got["mem_most"] and got["mem_swing"] >= 0.03, got or learned())
+    code, out, err = fs("room", "--kind", "run", "--repo", "demo", "--what", got["what"] if got else "", "--json")
+    v = json.loads(out) if out.startswith("{") else {}
+    sized = v.get("sized", {})
+    check("so another run of it is expected to hold its average and to reach its most", got and "hold.py" in sized.get("from", "")
+          and sized["mem_gb"] <= 0.85 * sized["mem_most"] and sized["mem_most"] >= 0.8 * said and v["mem"]["need"] >= sized["mem_gb"] - 0.02, out + err)
+
+    if not windows:
         code, out, err = fs("install", "--uninstall")
         check("the meter stops when told", until(lambda: not os.path.exists(os.path.join(home, "work.json")), 6), out + err)
 finally:

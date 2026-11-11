@@ -16,6 +16,10 @@ package main
 // re-learned and nothing has to be reset by hand. Besides the average, the spread of the minutes is
 // kept: a thread that waits on its model and then builds for five minutes is not a thread that
 // uses the same average steadily, and the room rule keeps room for the difference (room.go).
+// Memory is learned the same three ways: what a minute of it holds on average, how far its
+// minutes stray from that, and the most one minute of it held. The most is never what a piece
+// counts as; it is how far one piece can reach, and the room rule keeps that once for the open
+// work together, not once for every piece (room.go, memLoad).
 //
 // Why: Jon, 2026-11-11: a thread counted as one number per repo (appforgutters 1, owl-go 4.5) and
 // a gate as `--cores 4` typed by its caller; "every thread and every process is different".
@@ -38,11 +42,12 @@ import (
 type profile struct {
 	At      time.Time `json:"at"`
 	Minutes float64   `json:"minutes"`
-	// Cores is the sum of minutes times processors, Sq of minutes times processors squared, and
-	// MemGB of minutes times memory.
+	// Cores is the sum of minutes times processors, Sq of minutes times processors squared,
+	// MemGB of minutes times memory and MemSq of minutes times memory squared.
 	Cores float64 `json:"cores"`
 	Sq    float64 `json:"sq"`
 	MemGB float64 `json:"mem_gb"`
+	MemSq float64 `json:"mem_sq"`
 	// MemPeak is the most memory one stretch of it held, fading like the rest.
 	MemPeak float64 `json:"mem_peak"`
 	// Works is how many pieces of it ended and Seconds how long they ran in all.
@@ -54,7 +59,7 @@ type profile struct {
 func (p *profile) fade(now time.Time, halfLife time.Duration) {
 	if age := now.Sub(p.At); age > 0 && halfLife > 0 && !p.At.IsZero() {
 		f := math.Pow(0.5, float64(age)/float64(halfLife))
-		p.Minutes, p.Cores, p.Sq, p.MemGB, p.MemPeak, p.Works, p.Seconds = p.Minutes*f, p.Cores*f, p.Sq*f, p.MemGB*f, p.MemPeak*f, p.Works*f, p.Seconds*f
+		p.Minutes, p.Cores, p.Sq, p.MemGB, p.MemSq, p.MemPeak, p.Works, p.Seconds = p.Minutes*f, p.Cores*f, p.Sq*f, p.MemGB*f, p.MemSq*f, p.MemPeak*f, p.Works*f, p.Seconds*f
 	}
 	if now.After(p.At) {
 		p.At = now
@@ -76,12 +81,36 @@ func (p profile) meanSq() float64 {
 	return p.Sq / p.Minutes
 }
 
-// mem is the memory to keep for it: the most a recent stretch held, never under its average.
+// mem is the memory a minute of it holds on average.
+//
+// Why: until 2026-11-11 this was the most any minute of it ever held, and the room rule added
+// that up for every open piece. Jon's PC refused launches with 36 of 64 GB free: every thread
+// counted as 21.2 GB, the one heaviest minute of the heaviest thread, while the open threads held
+// 0.5 to 6 GB each. On a boat host the same day threads averaged 0.6 GB and their most was 6.7.
 func (p profile) mem() float64 {
 	if p.Minutes <= 0 {
 		return 0
 	}
-	return math.Max(p.MemGB/p.Minutes, p.MemPeak)
+	return p.MemGB / p.Minutes
+}
+
+// memSq is the average of the squares of its memory, from which its spread comes.
+func (p profile) memSq() float64 {
+	if p.Minutes <= 0 {
+		return 0
+	}
+	return math.Max(p.MemSq/p.Minutes, p.mem()*p.mem())
+}
+
+// memMost is the most one minute of it held lately, never under its average.
+func (p profile) memMost() float64 { return math.Max(p.mem(), p.MemPeak) }
+
+// seedMemSq gives a profile written before the squares were kept the squares of its average: how
+// far its minutes strayed is not known, and its most still says how far one piece reaches.
+func (p *profile) seedMemSq() {
+	if p.MemSq == 0 && p.Minutes > 0 {
+		p.MemSq = p.MemGB * p.MemGB / p.Minutes
+	}
 }
 
 func spread(mean, meanSq float64) float64 { return math.Sqrt(math.Max(0, meanSq-mean*mean)) }
@@ -173,6 +202,7 @@ func (l learned) add(now time.Time, sp stretch, s Settings) {
 			p.Cores += sp.Minutes * sp.Cores
 			p.Sq += sp.Minutes * sp.Cores * sp.Cores
 			p.MemGB += sp.Minutes * sp.MemGB
+			p.MemSq += sp.Minutes * sp.MemGB * sp.MemGB
 			p.MemPeak = math.Max(p.MemPeak, sp.MemGB)
 		}
 		if sp.Ended {
@@ -200,8 +230,12 @@ type level struct {
 	Minutes float64 `json:"minutes"`
 	Cores   float64 `json:"cores"`
 	// MeanSq is the average of the squared processors, which holds the spread.
-	MeanSq  float64 `json:"mean_sq"`
+	MeanSq float64 `json:"mean_sq"`
+	// MemGB is the memory a minute of it holds on average, MemSq the average of the squares, and
+	// MemPeak the most one minute held. Unset, the last two say no more than the average does.
 	MemGB   float64 `json:"mem_gb"`
+	MemSq   float64 `json:"mem_sq,omitempty"`
+	MemPeak float64 `json:"mem_peak,omitempty"`
 	Seconds float64 `json:"seconds,omitempty"`
 	// Weigh is how much the level counts for, in minutes: its minutes, and for a run its finished
 	// runs too. Unset, its minutes.
@@ -209,6 +243,9 @@ type level struct {
 	// Own says the minutes were measured on this machine for this very repo or command.
 	Own bool `json:"own,omitempty"`
 }
+
+func (lv level) memSq() float64   { return math.Max(lv.MemSq, lv.MemGB*lv.MemGB) }
+func (lv level) memMost() float64 { return math.Max(lv.MemPeak, lv.MemGB) }
 
 func (lv level) weigh() float64 {
 	if lv.Weigh > 0 {
@@ -242,7 +279,7 @@ func (l learned) levels(kind, repo, what string, seen *Sizing, now time.Time, s 
 		if q.Minutes <= 0 {
 			return
 		}
-		lv := level{Name: name, Minutes: round2(q.Minutes), Cores: q.mean(), MeanSq: q.meanSq(), MemGB: q.mem(), Own: own}
+		lv := level{Name: name, Minutes: round2(q.Minutes), Cores: q.mean(), MeanSq: q.meanSq(), MemGB: q.mem(), MemSq: q.memSq(), MemPeak: q.memMost(), Own: own}
 		if q.Works > 0 && kind == "run" {
 			lv.Seconds = q.Seconds / q.Works
 			lv.Weigh = q.Minutes + q.Works*s.LearnTrustMinutes/s.LearnTrustRuns
@@ -252,7 +289,7 @@ func (l learned) levels(kind, repo, what string, seen *Sizing, now time.Time, s 
 	at(learnKey(kind, "", ""), kindWords(kind)+" here", false)
 	if seen != nil && seen.Minutes > 0 {
 		out = append(out, level{Name: seen.From, Minutes: seen.Minutes, Cores: seen.Cores, MeanSq: seen.Swing*seen.Swing + seen.Cores*seen.Cores,
-			MemGB: seen.MemGB, Seconds: seen.Seconds})
+			MemGB: seen.MemGB, MemSq: seen.MemSwing*seen.MemSwing + seen.MemGB*seen.MemGB, MemPeak: seen.MemMost, Seconds: seen.Seconds})
 	}
 	if repo != "" {
 		at(learnKey(kind, repo, ""), repo+" "+kindWords(kind)+" here", true)
@@ -268,15 +305,21 @@ type Sizing struct {
 	// Cores is the processors it is expected to use and Swing how far its minutes stray from that.
 	Cores float64 `json:"cores"`
 	Swing float64 `json:"swing"`
-	MemGB float64 `json:"mem_gb"`
+	// MemGB is the memory it is expected to hold, MemSwing how far its minutes stray from that,
+	// and MemMost the most it is expected to reach.
+	MemGB    float64 `json:"mem_gb"`
+	MemSwing float64 `json:"mem_swing,omitempty"`
+	MemMost  float64 `json:"mem_most,omitempty"`
 	// Minutes is how much was measured at the nearest level that had any, and From names it; an
-	// empty From means nothing like it has been measured. FromCores, FromSwing and FromMemGB are
-	// what that level itself measured, which the estimate is pulled toward and not always at yet.
-	Minutes   float64 `json:"minutes"`
-	From      string  `json:"from,omitempty"`
-	FromCores float64 `json:"from_cores,omitempty"`
-	FromSwing float64 `json:"from_swing,omitempty"`
-	FromMemGB float64 `json:"from_mem_gb,omitempty"`
+	// empty From means nothing like it has been measured. FromCores, FromSwing, FromMemGB and
+	// FromMemMost are what that level itself measured, which the estimate is pulled toward and
+	// not always at yet.
+	Minutes     float64 `json:"minutes"`
+	From        string  `json:"from,omitempty"`
+	FromCores   float64 `json:"from_cores,omitempty"`
+	FromSwing   float64 `json:"from_swing,omitempty"`
+	FromMemGB   float64 `json:"from_mem_gb,omitempty"`
+	FromMemMost float64 `json:"from_mem_most,omitempty"`
 	// Seconds is how long such a run lasts, when runs of it have ended.
 	Seconds float64 `json:"seconds,omitempty"`
 }
@@ -287,7 +330,8 @@ type Sizing struct {
 // While the levels disagree the estimate's swing holds their disagreement too: work that is not
 // known yet is given room for being either.
 func size(base Need, levels []level, trust float64) Sizing {
-	mean, meanSq, mem := base.Cores, base.Cores*base.Cores, base.MemGB
+	mean, meanSq := base.Cores, base.Cores*base.Cores
+	mem, memSq, most := base.MemGB, base.MemGB*base.MemGB, base.MemGB
 	sz := Sizing{}
 	for _, lv := range levels {
 		if lv.Minutes <= 0 {
@@ -297,13 +341,16 @@ func size(base Need, levels []level, trust float64) Sizing {
 		mean = w*lv.Cores + (1-w)*mean
 		meanSq = w*lv.MeanSq + (1-w)*meanSq
 		mem = w*lv.MemGB + (1-w)*mem
+		memSq = w*lv.memSq() + (1-w)*memSq
+		most = w*lv.memMost() + (1-w)*most
 		sz.Minutes, sz.From = lv.Minutes, lv.Name
-		sz.FromCores, sz.FromSwing, sz.FromMemGB = round2(lv.Cores), round2(spread(lv.Cores, lv.MeanSq)), round2(lv.MemGB)
+		sz.FromCores, sz.FromSwing, sz.FromMemGB, sz.FromMemMost = round2(lv.Cores), round2(spread(lv.Cores, lv.MeanSq)), round2(lv.MemGB), round2(lv.memMost())
 		if lv.Seconds > 0 {
 			sz.Seconds = lv.Seconds
 		}
 	}
-	sz.Cores, sz.Swing, sz.MemGB = mean, spread(mean, meanSq), mem
+	sz.Cores, sz.Swing = mean, spread(mean, meanSq)
+	sz.MemGB, sz.MemSwing, sz.MemMost = mem, spread(mem, memSq), math.Max(most, mem)
 	return sz
 }
 
@@ -312,7 +359,7 @@ func size(base Need, levels []level, trust float64) Sizing {
 func measured(levels []level, machine string) *Sizing {
 	for i := len(levels) - 1; i >= 0; i-- {
 		if lv := levels[i]; lv.Own && lv.Minutes > 0 {
-			return &Sizing{Cores: round2(lv.Cores), Swing: round2(spread(lv.Cores, lv.MeanSq)), MemGB: round2(lv.MemGB), Minutes: lv.Minutes,
+			return &Sizing{Cores: round2(lv.Cores), Swing: round2(spread(lv.Cores, lv.MeanSq)), MemGB: round2(lv.MemGB), MemSwing: round2(spread(lv.MemGB, lv.memSq())), MemMost: round2(lv.memMost()), Minutes: lv.Minutes,
 				Seconds: round2(lv.Seconds), From: strings.TrimSuffix(lv.Name, " here") + " on " + machine}
 		}
 	}
@@ -330,7 +377,11 @@ func sizedWords(sz Sizing) string {
 	if sz.FromSwing >= 0.1 {
 		text += fmt.Sprintf(", give or take %.1f,", sz.FromSwing)
 	}
-	text += fmt.Sprintf(" and %.1f GB over %.0f minutes", sz.FromMemGB, sz.Minutes)
+	text += fmt.Sprintf(" and %.1f GB", sz.FromMemGB)
+	if sz.FromMemMost >= sz.FromMemGB+0.1 {
+		text += fmt.Sprintf(" (%.1f at its most)", sz.FromMemMost)
+	}
+	text += fmt.Sprintf(" over %.0f minutes", sz.Minutes)
 	if sz.Seconds >= 1 {
 		text += fmt.Sprintf(" (a run lasts about %s)", lasts(sz.Seconds))
 	}
@@ -356,7 +407,9 @@ func loadLearned() learned {
 		for k, p := range l {
 			if p == nil {
 				delete(l, k)
+				continue
 			}
+			p.seedMemSq()
 		}
 		return l
 	}
@@ -381,6 +434,7 @@ func loadLearned() learned {
 					// The old file kept sums only, so the spread within a day is not known.
 					mean := d.Cores / d.Minutes
 					p.Minutes, p.Cores, p.Sq, p.MemGB = p.Minutes+d.Minutes, p.Cores+d.Cores, p.Sq+d.Minutes*mean*mean, p.MemGB+d.MemGB
+					p.MemSq += d.MemGB * d.MemGB / d.Minutes
 					if end := at.Add(24 * time.Hour); end.After(p.At) {
 						p.At = end
 					}
@@ -420,15 +474,19 @@ func saveLearned(l learned) error {
 
 // learnedRow is one line of `fairshare learned`.
 type learnedRow struct {
-	Kind    string  `json:"kind"`
-	Repo    string  `json:"repo,omitempty"`
-	What    string  `json:"what,omitempty"`
-	Cores   float64 `json:"cores"`
-	Swing   float64 `json:"swing"`
-	MemGB   float64 `json:"mem_gb"`
-	Minutes float64 `json:"minutes"`
-	Works   float64 `json:"works"`
-	Seconds float64 `json:"seconds,omitempty"`
+	Kind  string  `json:"kind"`
+	Repo  string  `json:"repo,omitempty"`
+	What  string  `json:"what,omitempty"`
+	Cores float64 `json:"cores"`
+	Swing float64 `json:"swing"`
+	// MemGB is what a minute of it holds on average, MemSwing how far its minutes stray from
+	// that, and MemMost the most one minute held.
+	MemGB    float64 `json:"mem_gb"`
+	MemSwing float64 `json:"mem_swing"`
+	MemMost  float64 `json:"mem_most"`
+	Minutes  float64 `json:"minutes"`
+	Works    float64 `json:"works"`
+	Seconds  float64 `json:"seconds,omitempty"`
 }
 
 // table lists what was learned: threads, then runs, then loose jobs; within each the widest
@@ -446,7 +504,7 @@ func (l learned) table(now time.Time, s Settings) []learnedRow {
 			continue
 		}
 		row := learnedRow{Kind: parts[0], Repo: parts[1], What: parts[2], Cores: round2(q.mean()), Swing: round2(spread(q.mean(), q.meanSq())),
-			MemGB: round2(q.mem()), Minutes: round2(q.Minutes), Works: round2(q.Works)}
+			MemGB: round2(q.mem()), MemSwing: round2(spread(q.mem(), q.memSq())), MemMost: round2(q.memMost()), Minutes: round2(q.Minutes), Works: round2(q.Works)}
 		if q.Works > 0 {
 			row.Seconds = round2(q.Seconds / q.Works)
 		}

@@ -108,6 +108,9 @@ type Settings struct {
 	// LearnMargin is how much of the open work's swing (the spread of its measured minutes, taken
 	// together) is kept free on top of what it is expected to use. 0 keeps none.
 	LearnMargin float64 `json:"learn_margin"`
+	// LearnMemMargin is the same for memory. It is more than LearnMargin because the two do not
+	// fail alike: work short of processors runs slower, work short of memory is ended.
+	LearnMemMargin float64 `json:"learn_mem_margin"`
 }
 
 func (s Settings) halfLife() time.Duration {
@@ -153,6 +156,7 @@ func defaultSettings() Settings {
 		LearnTrustRuns:     1,
 		LearnRecentMinutes: 30,
 		LearnMargin:        1,
+		LearnMemMargin:     2,
 	}
 }
 
@@ -224,6 +228,9 @@ func (s Settings) check() error {
 	}
 	if s.LearnMargin < 0 {
 		return fmt.Errorf("learn_margin is %v; it cannot be negative", s.LearnMargin)
+	}
+	if s.LearnMemMargin < 0 {
+		return fmt.Errorf("learn_mem_margin is %v; it cannot be negative", s.LearnMemMargin)
 	}
 	if s.DiskReserveGB < 0 || s.ThreadDiskGB < 0 {
 		return fmt.Errorf("disk_reserve_gb and thread_disk_gb cannot be negative")

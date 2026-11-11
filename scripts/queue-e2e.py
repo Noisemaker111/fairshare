@@ -18,13 +18,15 @@ json.dump({"queue_notify": [sys.executable, "-I", notify], "queue_hold_minutes":
 fails = 0
 
 
-def reading(demand, firm=None):
+def reading(demand, firm=None, free=30, work=None):
     r = {"machine": "test-pc", "os": "windows", "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
          "processors": 24, "reserved": 4, "capacity": 20, "short_seconds": 60, "long_seconds": 600,
          "busy_short": min(demand, 20), "busy_long": min(demand, 20), "waiting_short": max(0, demand - 20), "waiting_long": max(0, demand - 20),
-         "demand_short": demand, "demand_long": demand, "mem_total_gb": 64, "mem_avail_gb": 30, "disk_path": "C:\\", "disk_free_gb": 60,
+         "demand_short": demand, "demand_long": demand, "mem_total_gb": 64, "mem_avail_gb": free, "disk_path": "C:\\", "disk_free_gb": 60,
          "presence": {"state": "active", "idle_minutes": 0},
          "firm_short": demand if firm is None else firm, "firm_long": demand if firm is None else firm}
+    if work:
+        r["work"] = work
     json.dump(r, open(os.path.join(home, "reading.json"), "w"))
 
 
@@ -165,6 +167,69 @@ json.dump({"owl_path": os.path.join(home, "no-owl.exe")}, open(os.path.join(home
 reading(19, firm=1)
 code, out = fs("room", "--urgent", "--take", "--label", "third fix")
 check("with no Owl to tell, the urgent answer says degraded", code == 0 and "degraded: Owl was not told" in out, out)
+
+# Memory. Jon's PC on 2026-11-11, when it refused launches: 64 GB with 36 free, and seven threads
+# open that hold 0.5 to 6 GB each. Each thread is written as the meter writes it: what it holds,
+# what it is expected to hold, how far its minutes stray, and the most it is expected to reach.
+for name in ("queue.json", "grants.json", "urgent.json", "settings.json"):
+    if os.path.exists(os.path.join(home, name)):
+        os.remove(os.path.join(home, name))
+shutil.rmtree(os.path.join(home, "queue"), ignore_errors=True)
+since = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def piece(kind, repo, what, holds, expected, swing, most):
+    return {"kind": kind, "repo": repo, "what": what, "since": since, "now": 0.2, "cores": 0.5, "minutes": 30, "expect": 0.5, "swing": 0.5,
+            "mem_gb": holds, "expect_mem_gb": expected, "mem_swing": swing, "mem_most": most, "processes": 4}
+
+
+seven = [piece("thread", "owl-go", "keeper", 0.6, 2.2, 3.4, 14.3), piece("thread", "owl-go", "frames", 0.5, 2.2, 3.4, 14.2),
+         piece("thread", "owl-go", "port-engine", 2.0, 2.6, 2.4, 7.7), piece("thread", "owl-go", "desktop-tests", 6.0, 2.1, 2.1, 8.9),
+         piece("thread", "appforgutters", "uploads", 0.5, 0.6, 0.3, 0.7), piece("thread", "appforgutters", "invoices", 0.8, 0.8, 0.2, 0.9),
+         piece("thread", "fairshare", "memory", 1.2, 1.2, 0.5, 1.9)]
+# What the meter learned there: a thread holds 3 GB on average, give or take 4, and the most one
+# ever held was 21.2; an Owl thread 2.7, give or take 3.7, and 18.4 at its most.
+json.dump({"thread||": {"at": at, "minutes": 1900, "cores": 2200, "sq": 3500, "mem_gb": 5700, "mem_sq": 47500, "mem_peak": 21.2},
+           "thread|owl-go|": {"at": at, "minutes": 700, "cores": 1150, "sq": 2300, "mem_gb": 1890, "mem_sq": 14686, "mem_peak": 18.4}},
+          open(os.path.join(home, "learned.json"), "w"))
+reading(6, free=36, work=seven)
+code, out = fs("room", "--threads", "7", "--repo", "gutter-quotes", "--json")
+v = json.loads(out) if out.startswith("{") else {"mem": {}, "sized": {}, "open": {}}
+m = v["mem"]
+at_their_most = sum(w["mem_most"] - w["mem_gb"] for w in seven)
+check("the rule before would refuse it: every open thread at its most at once is %.1f GB more, and the new thread %.1f, on 28.0 in use: %.1f of the 56 that may be taken"
+      % (at_their_most, v["sized"].get("mem_most", 0), 28 + at_their_most + v["sized"].get("mem_most", 0)),
+      at_their_most > 35 and v["sized"].get("mem_most", 0) > 21 and 28 + at_their_most + v["sized"]["mem_most"] > 56, out)
+check("36 of 64 GB free with seven threads open takes a thread: %.1f GB more is counted for the open threads and %.1f for the new one, %.1f of 56"
+      % (m.get("pending", 0), m.get("need", 0), m.get("used", 0) + m.get("pending", 0) + m.get("need", 0)),
+      code == 0 and v["ok"] and m["ok"] and 11 <= m["pending"] <= 13 and 8.5 <= m["need"] <= 10 and abs(v["open"]["mem_kept"] - 12.1) < 0.06, out)
+code, out = fs("status")
+check("and `fairshare status` shows what was counted", "holds 11.6 GB, expected to hold 11.7, 12.1 kept for when it holds more" in out, out)
+reading(6, free=26, work=seven)
+code, out = fs("room", "--threads", "7", "--repo", "gutter-quotes")
+check("with 26 GB free the next Owl build would land in the memory that is kept free: refused, and the answer says what was counted", code == 1
+      and "26.0 GB of 64 GB of memory is free, 8.0 GB is kept free" in out and "(never every piece at its most at once)" in out, out)
+# Really out of memory, with the same 36 GB free: four builds let in a minute ago hold 0.4 GB each
+# so far and are measured at 14. Nothing here is a peak; it is what they are on their way to.
+reading(6, free=36, work=[piece("run", "owl-go", "cargo test --workspace", 0.4, 14, 1, 15) for _ in range(4)])
+code, out = fs("room", "--threads", "3", "--repo", "gutter-quotes")
+check("four builds that have not taken their memory yet leave no room, however free the PC looks", code == 1
+      and "The 4 pieces of work open here hold 1.6 GB and are expected to hold 56.0" in out, out)
+# And a run that holds more than is free for as long as it runs.
+json.dump({"run|owl-go|cargo test --workspace": {"at": at, "minutes": 300, "cores": 600, "sq": 1200, "mem_gb": 9000, "mem_sq": 270000, "mem_peak": 30.5, "works": 30, "seconds": 18000}},
+          open(os.path.join(home, "learned.json"), "w"))
+reading(6, free=36)
+code, out = fs("room", "--kind", "run", "--repo", "owl-go", "--what", "cargo test --workspace")
+check("a build measured at 30 GB does not go into 28", code == 1 and "this run counts as 30." in out and "processors agent work may use" not in out, out)
+# Break it: with learn_mem_margin so high that every piece is kept at its most, the rule is the
+# old one again, and the evening's launch is refused.
+json.dump({"thread||": {"at": at, "minutes": 1900, "cores": 2200, "sq": 3500, "mem_gb": 5700, "mem_sq": 47500, "mem_peak": 21.2},
+           "thread|owl-go|": {"at": at, "minutes": 700, "cores": 1150, "sq": 2300, "mem_gb": 1890, "mem_sq": 14686, "mem_peak": 18.4}},
+          open(os.path.join(home, "learned.json"), "w"))
+json.dump({"learn_mem_margin": 1000}, open(os.path.join(home, "settings.json"), "w"))
+reading(6, free=36, work=seven)
+code, out = fs("room", "--threads", "7", "--repo", "gutter-quotes")
+check("kept at every piece's most, the same launch is refused as it was that evening", code == 1 and "a new thread counts as 21.1 GB" in out and "on top of 37.0 GB" in out, out)
 
 shutil.rmtree(home, ignore_errors=True)
 print("failures:", fails)
