@@ -322,6 +322,30 @@ code, out, err = fs("pool", "run", "--repo", "demo", "--elsewhere", "--placed", 
 last = [json.loads(l) for l in lines(os.path.join(home["pc"], "decisions.jsonl"))][-1]
 check("with room elsewhere it runs there, the placement is written first, and it is learned under the name given", code == 0 and out == os.path.realpath(host_repo)
       and json.load(open(went)).get("machine") == "host-a" and json.load(open(went)).get("extra") == {"t3_env": "env-a"} and last.get("what") == "demo gate", out + err + str(last))
+# A run with no verdict coming is given up in bounded time, by the machine that runs it.
+def alive(pid):
+    if os.name == "nt":
+        return str(pid) in subprocess.run(["tasklist", "/FI", "PID eq %d" % pid], capture_output=True, text=True).stdout
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+pidf = os.path.join(root, "run.pid")
+silent = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); print('started', flush=True); time.sleep(120)"
+began = time.time()
+code, out, err = fs("pool", "run", "--repo", "demo", "--quiet", "0.05", "--", py, "-c", silent, pidf)
+check("a run that goes silent is given up by the machine it runs on, which says why, and is ended there", code == 69 and out == "started"
+      and "gave the run up: it printed nothing for 3 seconds" in err and time.time() - began < 40 and not alive(int(open(pidf).read())), out + err)
+chatty = "import time\nwhile True:\n    print('.', flush=True)\n    time.sleep(0.5)"
+began = time.time()
+code, out, err = fs("pool", "run", "--repo", "demo", "--most", "0.05", "--", py, "-c", chatty)
+check("a run that never ends is given up at the most it is given", code == 69 and "gave the run up: it ran for 3 seconds, the most it is given" in err
+      and time.time() - began < 40, out[-200:] + err)
+code, out, err = fs("pool", "run", "--repo", "demo", "--quiet", "1", "--most", "1", "--", py, "-c", "import sys; print('fine'); sys.exit(7)")
+check("a run inside its limits is left alone: its output and its own exit", code == 7 and out == "fine" and "gave the run up" not in err, out + err)
 # As it was: the line empty, nothing counted, host-b asleep with hours nobody can read.
 for name in ("queue.json", "grants.json", "settings.json"):
     for h in ("pc", "host-a", "host-b"):

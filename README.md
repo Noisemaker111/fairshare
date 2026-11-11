@@ -257,6 +257,11 @@ fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install &
   script sent with every call). `--placed <file>` writes where it went before it runs, for a
   caller that has to fetch what the run left there. `--elsewhere` is for a caller that can run
   the command here itself: when this machine has the most room nothing is run and the exit is 70.
+  `--quiet N` and `--most N` give a run up when it has printed nothing for N minutes or has run
+  for N minutes: the machine that runs it keeps the time, ends it and everything it started, and
+  says why (exit 69), so a run nobody is listening to any more still ends; the placing machine
+  waits 90 seconds longer for the case where nothing comes back at all. Why: on 2026-11-11 a
+  landing gate on a starved boat host ran 38.9 minutes and ended with no verdict.
   With `--commit` it runs in a fresh checkout of exactly that commit, which is removed after; the
   folder's own checkout is not touched. On a member with a `busy_dir` it leaves its process id
   there while it runs, so the machine's idle watch does not put it to sleep under the run.

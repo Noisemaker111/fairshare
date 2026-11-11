@@ -294,6 +294,21 @@ func owlReserve() int {
 
 func hideWindow(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true} }
 
+// ownGroup has nothing to set on Windows: killTree follows the process tree.
+func ownGroup(*exec.Cmd) {}
+
+// killTree ends a command and everything it started.
+func killTree(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	kill := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(cmd.Process.Pid))
+	hideWindow(kill)
+	if kill.Run() != nil {
+		cmd.Process.Kill()
+	}
+}
+
 // logicalPerCore is the logical processors of one physical core (2 with SMT on).
 func logicalPerCore(logical int) int {
 	const entry = 32 // SYSTEM_LOGICAL_PROCESSOR_INFORMATION on 64-bit Windows

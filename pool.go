@@ -43,6 +43,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -290,6 +291,72 @@ type errand struct {
 	// Mark is left in the machine's fairshare home while Argv runs, so its meter measures the
 	// run as this run and its room rule counts it for as long as it runs.
 	Mark *runMark `json:"mark,omitempty"`
+	// Quiet and Most are minutes: Argv is given up when it has printed nothing for Quiet, or has
+	// run for Most. The machine that runs it keeps the time, so a run nobody is listening to any
+	// more (the carrier dropped) still ends.
+	Quiet float64 `json:"quiet,omitempty"`
+	Most  float64 `json:"most,omitempty"`
+}
+
+// touched passes what is written on and notes when.
+type touched struct {
+	to   io.Writer
+	last *atomic.Int64
+}
+
+func (t touched) Write(b []byte) (int, error) {
+	t.last.Store(time.Now().UnixNano())
+	return t.to.Write(b)
+}
+
+// watch runs a command, passing on what it prints, and gives it up (it and everything it started
+// are ended) when it has printed nothing for quiet or has run for most; zero is no limit. It
+// returns the command's exit, and why it was given up when it was.
+//
+// Why: on 2026-11-11 a landing gate sent to a boat host ran 38.9 minutes and ended with no
+// verdict. Nothing bounded it: not the host, where it had no room, and not the PC, which waited
+// on a stream that had nothing more to say.
+func watch(cmd *exec.Cmd, quiet, most time.Duration) (int, string) {
+	if quiet <= 0 && most <= 0 {
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		return exitCode(cmd.Run()), ""
+	}
+	var last atomic.Int64
+	last.Store(time.Now().UnixNano())
+	cmd.Stdout, cmd.Stderr = touched{os.Stdout, &last}, touched{os.Stderr, &last}
+	cmd.WaitDelay = 5 * time.Second // a child that outlived the kill does not hold the answer back
+	ownGroup(cmd)
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return exitCode(err), ""
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case err := <-done:
+			return exitCode(err), ""
+		case now := <-tick.C:
+			why := ""
+			switch {
+			case quiet > 0 && now.Sub(time.Unix(0, last.Load())) >= quiet:
+				why = fmt.Sprintf("it printed nothing for %s", span(quiet.Seconds()))
+			case most > 0 && now.Sub(start) >= most:
+				why = fmt.Sprintf("it ran for %s, the most it is given", span(most.Seconds()))
+			}
+			if why == "" {
+				continue
+			}
+			killTree(cmd)
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+			}
+			return cannotRun, why
+		}
+	}
 }
 
 func (e errand) word() string {
@@ -1292,6 +1359,8 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
       --placed <file>                write where it went (the placement, as JSON) before it runs
       --elsewhere                    for a caller that can run it here itself: when this machine has the most room,
                                      run nothing and exit 70
+      --quiet N --most N             give the run up (exit 69, and why) when it has printed nothing for N minutes,
+                                     or has run for N minutes; the machine that runs it ends it
 `
 
 func cmdPool(args []string) int {
@@ -1643,6 +1712,8 @@ func poolRun(args []string) int {
 	commit := fs.String("commit", "", "run it in a checkout of exactly this commit of --repo")
 	wait := fs.Float64("wait", 0, "minutes to keep asking while the pool is full")
 	as := fs.String("as", "", "what the run is called, when its words are a wrapper's")
+	quiet := fs.Float64("quiet", 0, "give the run up when it has printed nothing for this many minutes")
+	most := fs.Float64("most", 0, "give the run up when it has run for this many minutes")
 	placedFile := fs.String("placed", "", "write where it went, as JSON, before it runs")
 	elsewhere := fs.Bool("elsewhere", false, "when this machine has the most room, run nothing and exit 70")
 	fs.Parse(args)
@@ -1706,14 +1777,25 @@ func poolRun(args []string) int {
 			mark.Need = Need{Cores: a.verdict.CPU.Need, MemGB: a.verdict.Mem.Need}
 		}
 	}
-	cmd := m.command(context.Background(), errand{Argv: argv, Dir: m.folder(w.Repo), Commit: *commit, BusyDir: m.BusyDir, Mark: mark})
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd := m.command(context.Background(), errand{Argv: argv, Dir: m.folder(w.Repo), Commit: *commit, BusyDir: m.BusyDir, Mark: mark, Quiet: *quiet, Most: *most})
+	cmd.Stdin = os.Stdin
 	start := time.Now()
-	code := exitCode(cmd.Run())
+	// The machine that runs it keeps the time and says why it gave up. This side waits a little
+	// longer than that for the case where nothing comes back at all: a carrier that dropped.
+	grace := func(minutes float64) time.Duration {
+		if minutes <= 0 {
+			return 0
+		}
+		return time.Duration(minutes*float64(time.Minute)) + 90*time.Second
+	}
+	code, gaveUp := watch(cmd, grace(*quiet), grace(*most))
 	seconds := round2(time.Since(start).Seconds())
+	if gaveUp != "" {
+		fmt.Fprintf(os.Stderr, "degraded: nothing more came back from %s (%s): the run is given up after %.0f s\n", m.Name, gaveUp, seconds)
+	}
 	fmt.Fprintf(os.Stderr, "fairshare: %s ran it in %.1f s, exit %d\n", m.Name, seconds, code)
 	appendLine("decisions.jsonl", map[string]any{"at": time.Now().UTC(), "event": "pool run", "label": w.Label, "repo": w.Repo, "what": w.What, "commit": *commit,
-		"counted": mark.Need, "machine": m.Name, "woke": pl.Woke, "placed_seconds": pl.Seconds, "seconds": seconds, "exit": code}, 8<<20)
+		"counted": mark.Need, "machine": m.Name, "woke": pl.Woke, "placed_seconds": pl.Seconds, "seconds": seconds, "exit": code, "gave_up": gaveUp}, 8<<20)
 	return code
 }
 
@@ -1803,8 +1885,12 @@ func poolHere(word string) int {
 		cmd = exec.Command(loginShell(), append([]string{"-lc", `exec "$@"`, "fairshare"}, e.Argv...)...)
 	}
 	cmd.Dir = dir
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return exitCode(cmd.Run())
+	cmd.Stdin = os.Stdin
+	code, gaveUp := watch(cmd, minutes(e.Quiet), minutes(e.Most))
+	if gaveUp != "" {
+		fmt.Fprintf(os.Stderr, "degraded: %s gave the run up: %s. It and everything it started were ended.\n", host, gaveUp)
+	}
+	return code
 }
 
 // gitBash is the program a bare `bash` means on Windows: Git Bash when it is installed, not the

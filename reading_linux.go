@@ -169,6 +169,24 @@ func currentReading(s Settings) (Reading, error) {
 
 func hideWindow(*exec.Cmd) {}
 
+// ownGroup starts a command in a process group of its own, so killTree ends everything it started.
+func ownGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// killTree ends a command and everything it started.
+func killTree(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) != nil {
+		cmd.Process.Kill()
+	}
+}
+
 // tellYield has nobody to tell on Linux: no keeper holds agent work there.
 func tellYield(Settings, time.Time) error {
 	return errors.New("nothing holds agent work back on Linux")
