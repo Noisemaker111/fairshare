@@ -409,12 +409,18 @@ type reply struct {
 	verdict *Verdict
 }
 
-// jsonPart is the output from its first brace: a carrier may print a line of its own first.
+// jsonPart is the first JSON object in the output: a carrier may print lines of its own before
+// the answer and after it.
 func jsonPart(out []byte) []byte {
-	if i := strings.IndexByte(string(out), '{'); i >= 0 {
+	i := strings.IndexByte(string(out), '{')
+	if i < 0 {
+		return out
+	}
+	var first json.RawMessage
+	if json.NewDecoder(strings.NewReader(string(out[i:]))).Decode(&first) != nil {
 		return out[i:]
 	}
-	return out
+	return first
 }
 
 func tail(text string, n int) string {

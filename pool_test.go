@@ -194,6 +194,7 @@ func TestWhatAMachinePrintedIsRead(t *testing.T) {
 	}{
 		{"room, with what is left after the work", host, room, "", nil, "room", 4.6},
 		{"a line the carrier printed first does not hide the answer", host, "Warning: Permanently added 'bx_1' to known hosts.\n" + room, "", nil, "room", 4.6},
+		{"nor does a line it printed after", host, room + "\nConnection to bx_1 closed.\n", "", nil, "room", 4.6},
 		{"full, and still how far over", host, full, "", errors.New("exit status 1"), "full", -0.5},
 		{"a machine that could not tell", host, `{"ok": null, "degraded": "the meter has written no reading"}`, "", errors.New("exit status 2"), "degraded", 0},
 		{"a machine without the work's folder", host, `{"ok": null, "closed": "no folder /home/user/work/owl-go on box"}`, "", errors.New("exit status 3"), "closed", 0},
