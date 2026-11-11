@@ -22,6 +22,13 @@ The line is checked end to end by `python -I scripts/queue-e2e.py fairshare.exe`
 program in a private home, with real files, the real lock and a real notify command, on readings
 written by hand so "full" and "room" are certain whatever the PC is doing.
 
+The pool is checked end to end by `python -I scripts/pool-e2e.py fairshare.exe` (or
+`fairshare-linux` on Linux): three machines in private homes, each reached through a command put
+in front of the command as a real member is, with a real wake command, a real plan-hours command,
+real git checkouts, and a stand-in for the `mesh` program that prints what mesh prints. On Linux a
+hand-written reading comes from `FAIRSHARE_READING=<file>`, held to the same age limit as the
+meter's.
+
 To see it live: `fairshare status`, then the launch hook the way T3 runs it,
 `echo '<a t3_thread_launch payload>' | python -I ~/.claude/hooks/thread-cap.py`. To see it fail:
 `fairshare install --uninstall`, wait 20 s, and the same hook says `degraded:` and judges by its
@@ -42,6 +49,10 @@ old counts; `fairshare install` puts it back.
   manager's ping outbox (`notify-manager.py`), so a busy thread gets it when its turn ends.
 - `~/.agents/skills/boat-host/boat-host.sh up` copies `fairshare-linux` to each host as
   `~/.agents-pc/fairshare`.
+- Anything that wants a machine without naming one asks the pool: `fairshare pool place` for a
+  launch, `fairshare pool run` for a gate or a build. The pool is `pool.json` in the home of the
+  machine that places (the PC); each member is reached through its `via` (`boat ssh <id>`,
+  `mesh exec <device>`), and the far end of every via is `fairshare pool here` on that machine.
 - Owl applies the reserve: the meter runs `owl agents set reserve_processors <n> --for 3m
   --real-home` with `OWL_CALLER=fairshare`.
 - Owl holds older sessions back for an urgent launch: `owl agents set yield_before <unix seconds>
@@ -63,6 +74,12 @@ old counts; `fairshare install` puts it back.
   and the settings, and every number in them is tested there. Windows calls live only in
   `meter_windows.go`; Linux file reading only in `reading_linux.go`, with the parsing in
   `linuxproc.go` so it is tested on Windows too.
+- The pool decides nothing about a machine. Each member answers `fairshare room` for itself and
+  the pool compares; a rule about one machine's room goes in `room.go`, never in `pool.go`.
+- Everything sent to a member is one word of hex (`pool here <word>`): boat, SSH and mesh each
+  split and quote a command differently, and a member is never a different code path per carrier.
+- A machine that costs plan-hours is woken only when no awake machine has room, and never when
+  its hours cannot be read.
 - When it cannot tell, it exits 2 with `degraded: <cause>`. It never answers from a stale reading.
 - Windows calls go through `syscall`, never `golang.org/x/sys/windows`, which imports `net`.
 

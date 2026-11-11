@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,6 +105,15 @@ func measureUse(processors int) *cpuUse {
 // currentReading measures this machine now: processors in use from the kernel's counters, the
 // rest from its own averages.
 func currentReading(s Settings) (Reading, error) {
+	// A reading written by hand, for the checks that need "full" and "room" to be certain
+	// whatever this machine is doing. It is held to the meter's rule: never an old one.
+	if file := os.Getenv("FAIRSHARE_READING"); file != "" {
+		r, err := readingFrom(file)
+		if err == nil && time.Since(r.At) > time.Duration(max(3*s.SampleSeconds, 20)*float64(time.Second)) {
+			err = fmt.Errorf("the reading in %s is %.0f s old", file, time.Since(r.At).Seconds())
+		}
+		return r, err
+	}
 	f := linuxFiles{
 		Use:         measureUse(runtime.NumCPU()),
 		Loadavg:     slurp("/proc/loadavg"),
