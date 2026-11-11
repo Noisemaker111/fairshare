@@ -172,8 +172,12 @@ func reason(v Verdict, s Settings, a Ask) string {
 		b.WriteString(".")
 	}
 	if !v.Disk.OK {
-		fmt.Fprintf(&b, " %s has %.1f GB free, %.0f GB is kept free, and %s with a checkout counts as %.0f GB.",
+		fmt.Fprintf(&b, " %s has %.1f GB free, %.0f GB is kept free, and %s with a checkout counts as %.0f GB",
 			r.DiskPath, r.DiskFreeGB, s.DiskReserveGB, what, v.Disk.Need)
+		if v.Disk.Pending > 0 {
+			fmt.Fprintf(&b, " on top of %.0f GB for threads just let in", v.Disk.Pending)
+		}
+		b.WriteString(".")
 	}
 	return b.String()
 }
@@ -202,10 +206,10 @@ func windowOf(r Reading) float64 {
 }
 
 func span(seconds float64) string {
-	if seconds >= 120 {
+	if seconds >= 90 {
 		return fmt.Sprintf("%.0f minutes", seconds/60)
 	}
-	if seconds >= 60 {
+	if seconds >= 45 {
 		return "minute"
 	}
 	return fmt.Sprintf("%.0f seconds", seconds)

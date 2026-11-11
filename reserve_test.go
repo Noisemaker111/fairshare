@@ -113,6 +113,33 @@ func TestLinuxReadingUsesTheContainersOwnLimits(t *testing.T) {
 	}
 }
 
+// The night of 2026-11-10: ten heavy minutes, the meter restarted, then a calm look.
+func TestARestartedMeterStillKnowsTheLastTenMinutes(t *testing.T) {
+	now := time.Date(2026, 11, 11, 2, 31, 0, 0, time.UTC)
+	var lines []historyLineRead
+	for i := 12; i >= 1; i-- {
+		lines = append(lines, historyLineRead{At: now.Add(-time.Duration(i) * time.Minute), Capacity: 20, Busy: 15, Waiting: 12, MemAvailGB: 30})
+	}
+	var w window
+	w.seed(lines, now, 10*time.Minute)
+	w.add(sample{at: now.Add(5 * time.Second), seconds: 5, busy: 3, memAvailGB: 31}, 10*time.Minute)
+	busy, waiting, _, _, _, _, _, seconds := w.means(now.Add(5*time.Second), 10*time.Minute)
+	if seconds < 500 || busy < 14 || waiting < 11 {
+		t.Fatalf("after a restart the long window holds %.0f s at %.1f busy and %.1f waiting; want the ten heavy minutes", seconds, busy, waiting)
+	}
+	r := pc(3, busy+waiting, 31, 60, "active")
+	r.Capacity = 20
+	if v := decide(r, defaultSettings(), Ask{Threads: 7}, Need{}); v.OK {
+		t.Fatalf("a calm look after ten heavy minutes was given room: %s", v.Reason)
+	}
+	// History older than the window, or from the future, is not load.
+	var old window
+	old.seed([]historyLineRead{{At: now.Add(-11 * time.Minute), Busy: 20}, {At: now.Add(time.Minute), Busy: 20}}, now, 10*time.Minute)
+	if len(old.samples) != 0 {
+		t.Fatalf("seeded %d looks from outside the window", len(old.samples))
+	}
+}
+
 func TestWindowAveragesByTimeAndKeepsTheLeastMemory(t *testing.T) {
 	var w window
 	t0 := time.Date(2026, 11, 10, 21, 0, 0, 0, time.UTC)

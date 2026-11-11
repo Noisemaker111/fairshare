@@ -4,7 +4,7 @@ package main
 // are measured using instead of a fixed number. A fixed eight was wrong both ways: with nobody at
 // the PC a third of it sat idle while agent work queued, and a game that wants ten got eight.
 //
-// The reserve is the most the user's programs used in the last few minutes, with headroom, in
+// The reserve is the most the user's own programs used in the last few minutes, with headroom, in
 // whole physical cores (a thread on a core's second half still slows the first). It grows the
 // moment their programs use more or have to wait for a processor, and shrinks only after the whole
 // window has been quieter. Two things it remembers so it is right before the load shows: what each

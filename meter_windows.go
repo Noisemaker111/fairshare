@@ -496,6 +496,10 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		r.ReserveWhy = "reserved_processors in settings.json pins it"
 		return r, true, nil
 	}
+	// Only the user's own programs size the reserve. Windows' services (search indexing and
+	// Defender read every file a build writes, 4.4 processors at their peak on 2026-11-10) run at
+	// normal priority on any processor, so they need none kept; counting them made the reserve 8
+	// again with the user's programs at 0.3. The user's threads waiting is the check on this.
 	want, why := m.rv.want(now, userCPU/seconds, userWaiting, r.Presence, s, len(idle), m.perCore)
 	m.rv.save()
 	// Tell Owl when the number changes, and again every minute so it does not run out.
@@ -567,6 +571,9 @@ func runMeter() error {
 	}
 	os.Remove(stopFile())
 	var m meter
+	if lines, err := readHistory(time.Now().Add(-longWindow)); err == nil {
+		m.win.seed(lines, time.Now(), longWindow)
+	}
 	failures := 0
 	for {
 		s, err := loadSettings()

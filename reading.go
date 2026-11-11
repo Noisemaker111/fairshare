@@ -107,6 +107,23 @@ func (w *window) add(s sample, long time.Duration) {
 	w.samples = w.samples[i:]
 }
 
+// seed fills an empty window from the meter's own minute-by-minute history, so a meter that was
+// restarted still knows the last ten minutes. Why: on 2026-11-10 a reinstall emptied the window
+// during a calm minute between Rust builds, and three threads launched in the next 42 seconds were
+// let in on 3 to 5 busy processors; two minutes later the work wanted 29 of 20.
+func (w *window) seed(lines []historyLineRead, now time.Time, long time.Duration) {
+	if len(w.samples) > 0 {
+		return
+	}
+	for _, l := range lines {
+		if age := now.Sub(l.At); age < 0 || age > long {
+			continue
+		}
+		// A history line is the mean of the minute before it.
+		w.samples = append(w.samples, sample{at: l.At, seconds: 60, busy: l.Busy, waiting: l.Waiting, userBusy: l.UserBusy, memAvailGB: l.MemAvailGB})
+	}
+}
+
 // means averages the looks no older than d, each weighted by the time it covers.
 func (w *window) means(now time.Time, d time.Duration) (busy, waiting, userBusy, workCores, minMem float64, programs, others map[string]float64, seconds float64) {
 	minMem = math.Inf(1)
