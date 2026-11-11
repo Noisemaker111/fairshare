@@ -202,13 +202,25 @@ check("the rule before would refuse it: every open thread at its most at once is
       at_their_most > 35 and v["sized"].get("mem_most", 0) > 21 and 28 + at_their_most + v["sized"]["mem_most"] > 56, out)
 check("36 of 64 GB free with seven threads open takes a thread: %.1f GB more is counted for the open threads and %.1f for the new one, %.1f of 56"
       % (m.get("pending", 0), m.get("need", 0), m.get("used", 0) + m.get("pending", 0) + m.get("need", 0)),
-      code == 0 and v["ok"] and m["ok"] and 11 <= m["pending"] <= 13 and 8.5 <= m["need"] <= 10 and abs(v["open"]["mem_kept"] - 12.1) < 0.06, out)
+      code == 0 and v["ok"] and m["ok"] and 11 <= m["pending"] <= 13 and 5 <= m["need"] <= 6 and abs(v["open"]["mem_kept"] - 11.59) < 0.06
+      and abs(v["open"]["mem_reach"] - 12.1) < 0.06, out)
 code, out = fs("status")
-check("and `fairshare status` shows what was counted", "holds 11.6 GB, expected to hold 11.7, 12.1 kept for when it holds more" in out, out)
+check("and `fairshare status` shows what was counted", "holds 11.6 GB, expected to hold 11.7, 11.6 kept for when it holds more" in out, out)
+# The rarest minute of one piece lands in the 8 GB the PC keeps free, so it is not kept a second
+# time on top of it: with 26 GB free the launch that was refused while it was kept twice goes in.
 reading(6, free=26, work=seven)
+code, out = fs("room", "--threads", "7", "--repo", "gutter-quotes", "--json")
+v = json.loads(out) if out.startswith("{") else {"mem": {}, "sized": {}, "open": {}}
+m = v["mem"]
+kept_twice = 38 + (11.7 + 12.1 - 11.6) + 3 + (18.2 - 12.1)
+check("with 26 GB free the most a new thread reaches still fits in the PC (38 in use, %.1f more counted, of 56): let in, where keeping it on top of the reserve made %.1f"
+      % (m.get("pending", 0) + m.get("need", 0), kept_twice), code == 0 and v["ok"] and kept_twice > 56
+      and 38 + (11.7 - 11.6) + v["sized"]["mem_most"] <= 64, out)
+reading(6, free=24, work=seven)
 code, out = fs("room", "--threads", "7", "--repo", "gutter-quotes")
-check("with 26 GB free the next Owl build would land in the memory that is kept free: refused, and the answer says what was counted", code == 1
-      and "26.0 GB of 64 GB of memory is free, 8.0 GB is kept free" in out and "(never every piece at its most at once)" in out, out)
+check("with 24 GB free the seven's ordinary swing would land in the memory that is kept free: refused, and the answer says what was counted", code == 1
+      and "24.0 GB of 64 GB of memory is free, 8.0 GB is kept free" in out and "(never every piece at its most at once)" in out
+      and "The furthest one piece was seen reaching is 12.1 GB above that: the memory kept free takes the first of it." in out, out)
 # Really out of memory, with the same 36 GB free: four builds let in a minute ago hold 0.4 GB each
 # so far and are measured at 14. Nothing here is a peak; it is what they are on their way to.
 reading(6, free=36, work=[piece("run", "owl-go", "cargo test --workspace", 0.4, 14, 1, 15) for _ in range(4)])

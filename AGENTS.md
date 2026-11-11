@@ -121,6 +121,10 @@ old counts; `fairshare install` puts it back.
   was seen holding is how far it reaches, and room for that is kept once for the open work
   together (`memLoad.kept` in `work.go`), as processors keep room for the swing. A change that
   makes the most count once per piece again is the bug of 2026-11-11 (36 of 64 GB free, refused).
+- The most a piece was seen holding is its rarest minute, and it lands in the memory the machine
+  keeps free (`mem_reserve_fraction`) first: only the part the reserve does not cover is kept on
+  top. A change that keeps it on top of the whole reserve again is the second bug of 2026-11-11
+  (35 of 64 GB free, a 1 GB thread refused). The swing is never taken out of the reserve.
 - What a process used is read, not guessed, for every process a look ever saw. The one estimate
   is `creditUnseen` (`work.go`); a change that adds a second one must say why it cannot be read.
 - Windows calls go through `syscall`, never `golang.org/x/sys/windows`, which imports `net`.
