@@ -90,10 +90,13 @@ type OpenWork struct {
 	// Rest is the processors in use that belong to no piece of work.
 	Rest float64 `json:"rest"`
 	// MemGB is the memory the pieces hold now, MemExpect what they are expected to hold, and
-	// MemKept what is kept free above that for when they hold more (memLoad.kept).
+	// MemKept what is kept free above that for when they hold more (memLoad.kept). MemReach is
+	// how far the one that reaches furthest goes above what it is expected to hold: the part of
+	// it that MemKept does not cover is covered by the memory the machine keeps free anyway.
 	MemGB     float64 `json:"mem_gb"`
 	MemExpect float64 `json:"mem_expect"`
 	MemKept   float64 `json:"mem_kept"`
+	MemReach  float64 `json:"mem_reach"`
 }
 
 // Desk says whether work that drives the desktop may start, and why not.
@@ -244,13 +247,19 @@ func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 	// to be kept once it is one of them. It is the difference that is added, never the pieces'
 	// memory taken off the machine's: a piece's memory counts shared pages more than once, so the
 	// pieces can add up to more than the machine has in use.
+	//
+	// The reserve is free whatever the work does, so the rarest minute of one piece (the furthest
+	// it reaches) lands in it first, and only what the reserve does not cover is kept on top
+	// (memLoad.kept). So two things hold: what work is expected to hold, with its swing, leaves
+	// the reserve free; and the most one piece was seen holding still fits in the machine.
+	reserve := r.MemTotalGB * s.MemReserveFraction
 	memUsed := r.MemTotalGB - r.MemAvailGB
-	memTaken := memUsed + math.Max(0, mem.expect+mem.kept(s.LearnMemMargin)-mem.held)
+	memTaken := memUsed + math.Max(0, mem.expect+mem.kept(s.LearnMemMargin, reserve)-mem.held)
 	with := mem
 	with.add(0, sz.MemGB, sz.MemSwing, sz.MemMost, a.Count)
-	memAfter := memUsed + math.Max(need.MemGB, with.expect+with.kept(s.LearnMemMargin)-mem.held)
-	v.Open.MemGB, v.Open.MemExpect, v.Open.MemKept = round2(mem.held), round2(mem.expect), round2(mem.kept(s.LearnMemMargin))
-	reserve := r.MemTotalGB * s.MemReserveFraction
+	memAfter := memUsed + math.Max(need.MemGB, with.expect+with.kept(s.LearnMemMargin, reserve)-mem.held)
+	v.Open.MemGB, v.Open.MemExpect, v.Open.MemKept = round2(mem.held), round2(mem.expect), round2(mem.kept(s.LearnMemMargin, reserve))
+	v.Open.MemReach = round2(mem.reach)
 	v.Mem = Limit{Used: memUsed, Pending: pending.MemGB + memTaken - memUsed, Need: memAfter - memTaken, Limit: r.MemTotalGB - reserve, Unit: "GB of memory"}
 	v.Mem.OK = v.Mem.Used+v.Mem.Pending+v.Mem.Need <= v.Mem.Limit+1e-9
 
@@ -330,7 +339,13 @@ func openMemWords(v Verdict) string {
 			text += fmt.Sprintf(", with %.1f kept for when it holds more", o.MemKept)
 		}
 	}
-	return text + "."
+	text += "."
+	if o.MemReach >= o.MemKept+0.1 {
+		// The reserve covers the rest of the furthest reach: said, so the two numbers are not
+		// read as one margin that forgot the other.
+		text += fmt.Sprintf(" The furthest one piece was seen reaching is %.1f GB above that: the memory kept free takes the first of it.", o.MemReach)
+	}
+	return text
 }
 
 func reason(v Verdict, s Settings, a Ask) string {

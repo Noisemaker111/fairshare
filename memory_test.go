@@ -80,32 +80,51 @@ func TestRoomIsKeptOnceForOpenWorkToHoldMoreNotOncePerPiece(t *testing.T) {
 		return m
 	}
 	// One thread that builds at 21 will build: all of its reach is kept, whatever its swing says.
-	if got := load(1, 3, 4, 21).kept(2); got != 18 {
+	if got := load(1, 3, 4, 21).kept(2, 0); got != 18 {
 		t.Fatalf("one piece: %.1f kept, want its whole reach of 18", got)
 	}
 	// Eight of them do not build in the same minute: 22.6 is kept (twice their swing together),
 	// which is one at its most and a second well on its way, and not eight times 18.
-	if got := load(8, 3, 4, 21).kept(2); !near(got, 2*4*math.Sqrt(8)) || got > 144/6 {
+	if got := load(8, 3, 4, 21).kept(2, 0); !near(got, 2*4*math.Sqrt(8)) || got > 144/6 {
 		t.Fatalf("eight pieces: %.1f kept, want 22.6", got)
 	}
 	// Thirty-two of them: 45 is kept, where every piece at its most would be 576.
-	if got := load(32, 3, 4, 21).kept(2); !near(got, 2*4*math.Sqrt(32)) {
+	if got := load(32, 3, 4, 21).kept(2, 0); !near(got, 2*4*math.Sqrt(32)) {
 		t.Fatalf("thirty-two pieces: %.1f kept, want 45.3", got)
 	}
 	// Steady work that is nearly always at its most: its swing is wide of its reach, and no
 	// more is kept than all of it at its most.
-	if got := load(4, 9, 3, 10).kept(2); got != 4 {
+	if got := load(4, 9, 3, 10).kept(2, 0); got != 4 {
 		t.Fatalf("four pieces that reach 1 above their average: %.1f kept, want 4", got)
 	}
 	// learn_mem_margin 0 keeps nothing for chance: only what is certain, one piece's reach.
-	if got := load(8, 3, 4, 21).kept(0); got != 18 {
+	if got := load(8, 3, 4, 21).kept(0, 0); got != 18 {
 		t.Fatalf("with no margin: %.1f kept, want 18", got)
 	}
 	// Three of one run started together reach their most together: three times one.
 	var three memLoad
 	three.add(0, 5, 1, 9, 3)
-	if three.expect != 15 || three.kept(2) != 12 {
-		t.Fatalf("three started together: %.1f expected and %.1f kept, want 15 and 12", three.expect, three.kept(2))
+	if three.expect != 15 || three.kept(2, 0) != 12 {
+		t.Fatalf("three started together: %.1f expected and %.1f kept, want 15 and 12", three.expect, three.kept(2, 0))
+	}
+
+	// The machine keeps a reserve free whatever the work does, and the rarest minute of one piece
+	// lands in it first. With 8 GB kept free, the one thread that builds at 21 has 10 kept on top:
+	// the 18 it reaches still fit in the machine, and are not kept twice.
+	if got := load(1, 3, 4, 21).kept(2, 8); got != 10 {
+		t.Fatalf("one piece on a machine that keeps 8 free: %.1f kept, want 10", got)
+	}
+	// The swing is every hour's ordinary up and down, not a rare minute: none of it is taken out
+	// of the reserve. Eight of them keep the same 22.6.
+	if got := load(8, 3, 4, 21).kept(2, 8); !near(got, 2*4*math.Sqrt(8)) {
+		t.Fatalf("eight pieces on a machine that keeps 8 free: %.1f kept, want 22.6", got)
+	}
+	// A reserve wider than any reach keeps nothing less than the swing, and never less than nothing.
+	if got := load(1, 3, 1, 5).kept(2, 8); got != 2 {
+		t.Fatalf("one piece that reaches 2 on a machine that keeps 8 free: %.1f kept, want 2", got)
+	}
+	if got := load(1, 3, 0, 3).kept(2, 8); got != 0 {
+		t.Fatalf("one steady piece: %.1f kept, want 0", got)
 	}
 }
 
@@ -202,35 +221,36 @@ func TestThePCWith36GBFreeTakesAThread(t *testing.T) {
 	if !v.OK || !v.Mem.OK {
 		t.Fatalf("36 of 64 GB free and seven threads holding %.1f GB: %s", held, v.Reason)
 	}
-	// The seven hold 11.6 GB and are expected to hold 11.7. Room for the one that reaches furthest
-	// (an Owl thread three minutes old, 12.1 above what it is expected to hold) is kept once: 12.2
-	// owed in all, where adding every thread's reach up made 36.9. The new thread is expected to
-	// hold 1.7 and may reach 21.1: that is 7.3 further than any of the seven, so it adds 1.7 and
-	// that 7.3, and counts as 9.0, not as 21.1.
+	// The seven hold 11.6 GB and are expected to hold 11.7. Room for them to hold more is kept
+	// once: 12.2 owed in all, where adding every thread's reach up made 36.9. The new thread is
+	// expected to hold 1.7 and may reach 21.1. The 8 GB the PC keeps free takes the first of
+	// that rare minute, so it adds 1.7 and the 1.2 that is still further than what is kept
+	// already, and counts as 2.9: not as 21.1, and not as 9.0 either, which is what it counted
+	// as while the reach was kept on top of the reserve.
 	if !near(v.Open.MemGB, held) || v.Open.MemExpect < 11 || v.Open.MemExpect > 12.5 || v.Open.MemKept < 11.5 || v.Open.MemKept > 12.6 {
 		t.Fatalf("the open work's memory: %+v", v.Open)
 	}
-	if v.Sized.MemGB < 1.5 || v.Sized.MemGB > 2 || v.Mem.Need < 8.5 || v.Mem.Need > 9.5 || v.Mem.Pending < 11.5 || v.Mem.Pending > 13 {
+	if v.Sized.MemGB < 1.5 || v.Sized.MemGB > 2 || v.Mem.Need < 2.5 || v.Mem.Need > 3.3 || v.Mem.Pending < 11.5 || v.Mem.Pending > 13 {
 		t.Fatalf("a new thread: expected to hold %.1f, counted as %.1f on top of %.1f", v.Sized.MemGB, v.Mem.Need, v.Mem.Pending)
 	}
-	if total := v.Mem.Used + v.Mem.Pending + v.Mem.Need; total < 48.5 || total > 50 {
+	if total := v.Mem.Used + v.Mem.Pending + v.Mem.Need; total < 42 || total > 43.5 {
 		t.Fatalf("counted as %.1f of the %.1f GB that may be taken", total, v.Mem.Limit)
 	}
 	t.Logf("before: 28.0 in use + %.1f owed + %.1f for the thread = %.1f of %.1f, refused", owedBefore, v.Sized.MemMost, 28+owedBefore+v.Sized.MemMost, v.Mem.Limit)
 	t.Logf("now:    28.0 in use + %.1f owed + %.1f for the thread = %.1f of %.1f, let in", v.Mem.Pending, v.Mem.Need, 28+v.Mem.Pending+v.Mem.Need, v.Mem.Limit)
 
-	// It is not let in on the average alone. With 26 GB free the next Owl build would land in
-	// the memory that is kept free, and the answer says what was counted.
+	// It is not let in on the average alone. With 22 GB free the seven's ordinary swing would
+	// land in the memory that is kept free, and the answer says what was counted.
 	tight := r
-	tight.MemAvailGB = 26
+	tight.MemAvailGB = 22
 	if v := decide(tight, s, ask, Need{}); v.OK || v.Mem.OK || !strings.Contains(v.Reason, "(never every piece at its most at once)") ||
 		!strings.Contains(v.Reason, fmt.Sprintf("The 7 pieces of work open here hold %.1f GB and are expected to hold", held)) {
-		t.Fatalf("26 GB free: %s", v.Reason)
+		t.Fatalf("22 GB free: %s", v.Reason)
 	}
 	// An AppForGutters thread, whose threads were never seen above 1 GB, still fits there.
 	afg := Ask{Threads: 7, Learned: known.levels("thread", "appforgutters", "", nil, l.now, s)}
 	if v := decide(tight, s, afg, Need{}); !v.OK || v.Mem.Need > 1.2 {
-		t.Fatalf("an AppForGutters thread with 26 GB free: counted as %.1f GB: %s", v.Mem.Need, v.Reason)
+		t.Fatalf("an AppForGutters thread with 22 GB free: counted as %.1f GB: %s", v.Mem.Need, v.Reason)
 	}
 }
 
@@ -279,10 +299,11 @@ func TestWhatWouldRunThePCOutOfMemoryIsStillRefused(t *testing.T) {
 	}
 
 	// And an urgent launch, which the open work steps aside for on its processors, is still
-	// counted at the most it reaches: memory is not given back by lowering a priority.
+	// counted with its swing whole (3 expected and twice 4.8): memory is not given back by
+	// lowering a priority.
 	urgent := free()
 	urgent.MemAvailGB = 20
-	if v := decide(urgent, s, Ask{Urgent: true, Learned: owl}, Need{}); v.OK || v.Mem.OK || v.Mem.Need < 14.5 || v.Mem.Need > 15 {
+	if v := decide(urgent, s, Ask{Urgent: true, Learned: owl}, Need{}); v.OK || v.Mem.OK || v.Mem.Need < 12 || v.Mem.Need > 13 {
 		t.Fatalf("an urgent Owl thread with 20 GB free: counted as %.2f GB: %s", v.Mem.Need, v.Reason)
 	}
 }
@@ -314,5 +335,103 @@ func TestAnOpenThreadIsExpectedToHoldWhatItsOwnMinutesHeld(t *testing.T) {
 	// and to reach 14.3, not to hold 18.4.
 	if w := by["keeper"]; w.MemGB != 0.6 || w.ExpectMemGB < 2 || w.ExpectMemGB > 3 || w.MemMost < 14 || w.MemMost > 18.4 {
 		t.Fatalf("an Owl thread three minutes old: %+v", w)
+	}
+}
+
+// pcOfThatNight is Jon's PC later the same day, 2026-11-11 at 17:36, from its own `fairshare status
+// --json`: 64 GB with 35.2 free, 4 of 22 processors in use, and nine threads open that hold 9 GB.
+// One Owl thread four minutes old holds 0.8 GB and might build Rust at 18.5, because one minute
+// in 2,500 of every thread measured had held 25.3.
+func pcOfThatNight() Reading {
+	r := pc(8.3, 5.3, 35.17, 52, "away")
+	r.Reserved, r.Capacity = 2, 22
+	for _, w := range []LiveWork{
+		{Repo: "owl-go", What: "t3-rust-port-machinery", MemGB: 0.76, ExpectMemGB: 2.41, MemSwing: 1.16, MemMost: 18.52},
+		{Repo: "jk101", MemGB: 3.51, ExpectMemGB: 3.81, MemSwing: 1.94, MemMost: 7.9},
+		{Repo: "manager", MemGB: 0.86, ExpectMemGB: 1.42, MemSwing: 1.11, MemMost: 9.78},
+		{Repo: "owl-go", What: "claude-tests-off-jons-desktop", MemGB: 0.57, ExpectMemGB: 1.35, MemSwing: 1.09, MemMost: 8.19},
+		{Repo: "fairshare", MemGB: 0.53, ExpectMemGB: 0.94, MemSwing: 0.3, MemMost: 3.47},
+		{Repo: "appforgutters", MemGB: 0.58, ExpectMemGB: 1.33, MemSwing: 1.32, MemMost: 4.09},
+		{Repo: "jgengine", MemGB: 1.63, ExpectMemGB: 1.53, MemSwing: 0.61, MemMost: 3.44},
+		{Repo: "jk101", MemGB: 0.46, ExpectMemGB: 0.68, MemSwing: 0.66, MemMost: 4.62},
+		{Repo: "scratch", MemGB: 0.08, ExpectMemGB: 0.09, MemSwing: 0.12, MemMost: 0.22},
+	} {
+		w.Kind = "thread"
+		r.Work = append(r.Work, w)
+	}
+	return r
+}
+
+// The rarest minute of one piece lands in the memory the machine keeps free: it is not kept a
+// second time on top of it.
+func TestARarePeakUsesTheMemoryKeptFreeAndIsNotKeptTwice(t *testing.T) {
+	s := defaultSettings()
+	r := pcOfThatNight()
+	// What had been measured: every thread 1.4 GB give or take 0.7, and 25.3 in its heaviest
+	// minute; Owl threads 2.8 give or take 1, and the same 25.3; fairshare threads 0.9, never
+	// above it.
+	every := level{Name: "threads here", Minutes: 2547, Cores: 0.82, MeanSq: 0.82*0.82 + 1.72*1.72, MemGB: 1.44, MemSq: 1.44*1.44 + 0.71*0.71, MemPeak: 25.26}
+	owl := level{Name: "owl-go threads here", Minutes: 438, Cores: 2.4, MeanSq: 2.4*2.4 + 2.4*2.4, MemGB: 2.82, MemSq: 2.82*2.82 + 1.04*1.04, MemPeak: 25.26, Own: true}
+	small := level{Name: "fairshare threads here", Minutes: 79, Cores: 1, MeanSq: 1.09, MemGB: 0.89, MemSq: 0.89 * 0.89, MemPeak: 0.89, Own: true}
+
+	// The rule that refused it kept the furthest reach on top of the reserve.
+	_, _, _, open := openWork(r.Work)
+	used := r.MemTotalGB - r.MemAvailGB
+	limit := r.MemTotalGB * (1 - s.MemReserveFraction)
+	if owed := open.expect + open.reach - open.held; !near(open.reach, 16.11) || used+owed < 49 || limit-used-owed > 7 {
+		t.Fatalf("that night: %.1f in use and %.1f owed with the reach kept whole, of %.1f", used, owed, limit)
+	}
+	for _, c := range []struct {
+		name            string
+		levels          []level
+		before          float64 // what it counted as while the reach was kept on top of the reserve
+		least, most     float64 // what it counts as now
+		totalLo, totalH float64
+	}{
+		{"a thread in a repo not measured yet", []level{every}, 9.06, 8.9, 9.2, 50, 51.2},
+		{"an Owl thread", []level{every, owl}, 9.14, 9, 9.3, 50, 51.3},
+	} {
+		v := decide(r, s, Ask{Learned: c.levels}, Need{})
+		if before := used + open.expect + open.reach - open.held + c.before; before <= limit {
+			t.Fatalf("%s: the rule before counted %.1f of %.1f and would have let it in; that night it refused", c.name, before, limit)
+		}
+		if !v.OK || !v.Mem.OK || v.Mem.Need < c.least || v.Mem.Need > c.most {
+			t.Fatalf("%s: counted as %.2f GB: %s", c.name, v.Mem.Need, v.Reason)
+		}
+		if total := v.Mem.Used + v.Mem.Pending + v.Mem.Need; total < c.totalLo || total > c.totalH {
+			t.Fatalf("%s: %.1f of %.1f GB counted as taken", c.name, total, v.Mem.Limit)
+		}
+		// 8.1 is kept on top of the 8 the PC keeps free: together the 16.1 the Owl thread reaches.
+		if !near(v.Open.MemKept, 8.11) || !near(v.Open.MemReach, 16.11) {
+			t.Fatalf("%s: the open work: %+v", c.name, v.Open)
+		}
+	}
+	// A thread of a repo never seen above 1 GB counts as about that, and has room to spare.
+	if v := decide(r, s, Ask{Learned: []level{every, small}}, Need{}); !v.OK || v.Mem.Need > 1.5 {
+		t.Fatalf("a fairshare thread: counted as %.2f GB: %s", v.Mem.Need, v.Reason)
+	}
+
+	// What has to hold still holds. The most one piece was seen holding fits in the machine: with
+	// 26 GB free, 25.3 for a new thread on top of what the nine are expected to hold does not,
+	// and it is refused, with both numbers in the answer.
+	tight := r
+	tight.MemAvailGB = 26
+	v := decide(tight, s, Ask{Learned: []level{every}}, Need{})
+	if v.OK || v.Mem.OK || !strings.Contains(v.Reason, "with 8.1 kept for when they hold more (never every piece at its most at once).") ||
+		!strings.Contains(v.Reason, "The furthest one piece was seen reaching is 16.1 GB above that: the memory kept free takes the first of it.") {
+		t.Fatalf("26 GB free: %s", v.Reason)
+	}
+	if fits := tight.MemTotalGB - tight.MemAvailGB + (open.expect - open.held) + v.Sized.MemMost; fits <= tight.MemTotalGB {
+		t.Fatalf("26 GB free: the most a new thread reaches would fit in the machine (%.1f of %.0f), and it was refused", fits, tight.MemTotalGB)
+	}
+	// And a thread that was never seen above 1 GB still fits there.
+	if v := decide(tight, s, Ask{Learned: []level{every, small}}, Need{}); !v.OK {
+		t.Fatalf("a fairshare thread with 26 GB free: %s", v.Reason)
+	}
+	// A machine that keeps nothing free has nothing to take a rare minute out of: all of it is kept.
+	none := s
+	none.MemReserveFraction = 0
+	if v := decide(r, none, Ask{Learned: []level{every}}, Need{}); !near(v.Open.MemKept, 16.11) || v.Mem.Need < 8.9 {
+		t.Fatalf("no reserve: %+v, a new thread counted as %.2f", v.Open, v.Mem.Need)
 	}
 }

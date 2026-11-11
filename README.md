@@ -66,18 +66,24 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   what its own minutes held, the recent ones most. What counts as taken is the memory in use,
   plus whatever the open work is expected to hold beyond what it holds now, plus room kept once
   for it to hold more. That room is the larger of two things: how far the one piece that reaches
-  furthest goes above what it is expected to hold (every piece reaches its most at some time, so
-  that is certain), and `learn_mem_margin` times the swing of the pieces taken together (how many
-  are high in the same minute is chance); and never more than every piece at its most at once.
+  furthest goes above what it is expected to hold, less the memory the machine keeps free anyway
+  (`mem_reserve_fraction`); and `learn_mem_margin` times the swing of the pieces taken together
+  (how many are high in the same minute is chance); and never more than every piece at its most
+  at once. So two things always hold: what work is expected to hold, with its ordinary swing,
+  leaves the reserve free; and the most one piece was ever seen holding still fits in the
+  machine. That most is its rarest minute, and a rare minute is what a reserve is for.
   A new piece adds what it is expected to hold and whatever more has to be kept once it is one
   of them. Several pieces started together count as one piece that many times the size: they
   are one command and reach their most together. Why: until 2026-11-11 every open thread
   counted as the most it might reach, added up, and a new thread as the most any thread ever
   held. Jon's PC refused launches with 36 of 64 GB free ("a new thread counts as 21.1 GB on top
   of 36.5 GB that work let in or open here is still expected to take") while its seven threads
-  held 0.5 to 6 GB each. The same evening counts as 9.0 GB on top of 12.2 now, 49 of the 56 GB
-  that may be taken, and is let in; with 26 GB free it is still refused, because the next Owl
-  build would land in the memory that is kept free.
+  held 0.5 to 6 GB each. Later that night it refused again with 35 of 64 GB free and 4 of 22
+  processors in use, a 1 GB thread too: one Owl thread four minutes old might build Rust at 25
+  GB, as one minute in 2,500 had, and 16 to 24 GB was kept for that minute on top of the 8 GB
+  reserve, two margins against the same event. That evening's launch now counts as 2.9 GB on
+  top of 12.2, 43 of the 56 GB that may be taken; the night's as 9.1 on top of 12.7, 51 of 56.
+  With 26 GB free that night it is still refused, because 25 GB more would not fit in the PC.
 - **Counts a launch only until it is seen running.** Work let in a moment ago counts at its
   estimate until the meter sees it (a new piece of its kind and repo), then as itself. A run
   counts for exactly as long as it runs. Work that never shows up stops counting after 5

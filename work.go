@@ -682,8 +682,18 @@ func (m *memLoad) add(held, expect, swing, most float64, count int) {
 // Why: until 2026-11-11 what was kept was every piece's own reach, added up: all of them at
 // their most in one minute, on top of what was in use. That is the top of the range, and it was
 // treated as the expectation.
-func (m memLoad) kept(margin float64) float64 {
-	return math.Max(m.reach, math.Min(margin*math.Sqrt(m.swingSq), m.reachSum))
+//
+// reserve is the memory the machine keeps free whatever work does (mem_reserve_fraction). The
+// furthest reach is the rarest minute a piece was ever seen in, and that minute is what a reserve
+// is for: it must fit in the machine, so only the part of it the reserve does not cover is kept
+// on top. The swing, which is every hour's ordinary up and down, stays out of the reserve whole.
+//
+// Why: that evening the reach was kept on top of the reserve. One Owl thread four minutes old
+// might build Rust at 25 GB, as one minute in 2,500 had, so 16 to 24 GB was kept for it and 8 GB
+// more as the reserve: half the PC's memory held for two margins against the same minute. With 35
+// of 64 GB free it refused every launch, a 1 GB thread too.
+func (m memLoad) kept(margin, reserve float64) float64 {
+	return math.Max(m.reach-reserve, math.Min(margin*math.Sqrt(m.swingSq), m.reachSum))
 }
 
 func workWords(w LiveWork) string {
