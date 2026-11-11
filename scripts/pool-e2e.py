@@ -235,6 +235,100 @@ runs = [r for r in record if r.get("event") == "pool run"]
 check("every placement and run is on the record, with how long each took", len(runs) == 6 and runs[-1]["machine"] == "host-a" and runs[-1]["commit"] == first
       and all("seconds" in r for r in record if r.get("event") == "pool place"), runs)
 
+# The line. A launch (it has a key and a launcher) that no machine has room for waits for the
+# machines open to it, and with no queue_place command the pool itself finds it a machine.
+notify = os.path.join(root, "notify.py")
+open(notify, "w").write("import os, sys\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'told.jsonl'), 'a').write(sys.stdin.read().strip() + '\\n')\n")
+json.dump({"queue_notify": [py, "-I", notify], "queue_place_seconds": 0.01}, open(os.path.join(home["pc"], "settings.json"), "w"))
+asked = os.path.join(root, "launch.json")
+open(asked, "w").write('{"title": "a waiting launch"}')
+reading("pc", 17.9, processors=24, reserved=4, state="active", system="windows")
+reading("host-a", 7.9)
+launch = ("--label", "a waiting launch", "--repo", "demo", "--folder", "--take", "--no-wake", "--key", "k1", "--launcher", "thread-1", "--request", asked)
+code, pl, raw = placed(*launch)
+check("a launch no machine has room for joins the line, for the machines open to it", code == 1 and pl.get("queued") is True and pl.get("place") == 1
+      and "It is in the line, place 1 of 1, for pc, host-a" in pl.get("reason", "") and "thread-1" in pl.get("reason", ""), raw)
+line = json.loads(fs("queue", "--json")[1])
+check("with its request kept, and not for the machine that has no folder for its repo", len(line) == 1 and line[0]["machines"] == ["pc", "host-a"]
+      and line[0].get("folder") is True and open(line[0]["request"]).read() == '{"title": "a waiting launch"}', line)
+code, pl, raw = placed(*launch)
+check("sent again while it waits it keeps its place", code == 1 and pl.get("queued") is True and "already in the line, place 1 of 1" in pl.get("reason", "")
+      and len(json.loads(fs("queue", "--json")[1])) == 1, raw)
+reading("host-a", 0.5)
+code, pl, raw = placed("--label", "behind it", "--repo", "demo", "--folder", "--take", "--no-wake", "--key", "k2", "--launcher", "thread-2")
+check("a launch that arrives when room has appeared does not pass the one waiting for the same machines", code == 1 and pl.get("queued") is True and pl.get("place") == 2
+      and "launches already wait in the line for it" in raw, raw)
+code, pl, raw = placed("--label", "hotfix for production", "--repo", "demo", "--folder")
+check("an urgent one does", code == 0 and pl.get("machine") == "host-a", raw)
+code, out, err = fs("queue", "move")
+told = [json.loads(l) for l in lines(os.path.join(root, "told.jsonl"))]
+check("the pool finds the first in line a machine, and its launcher is told", len(told) >= 1 and told[0]["event"] == "offer" and told[0]["entry"]["key"] == "k1"
+      and told[0]["entry"]["machine"] == "host-a", str(told) + out + err)
+check("the room is counted on that machine", "a waiting launch" in [g.get("label") for g in json.load(open(os.path.join(home["host-a"], "grants.json")))], out + err)
+code, pl, raw = placed(*launch)
+check("sent again, it goes to the machine held for it, with that machine's own fields", code == 0 and pl.get("machine") == "host-a" and pl.get("took") is True
+      and "waited in the line" in pl.get("reason", "") and pl.get("extra") == {"t3_env": "env-a"}
+      and "k1" not in [e["key"] for e in json.loads(fs("queue", "--json")[1])], raw)
+# A launch only a sleeping machine could take waits for it, and is offered it once it may be woken.
+for name in ("queue.json", "grants.json"):
+    for h in ("pc", "host-a", "host-b"):
+        os.path.exists(os.path.join(home[h], name)) and os.remove(os.path.join(home[h], name))
+os.path.exists(os.path.join(root, "told.jsonl")) and os.remove(os.path.join(root, "told.jsonl"))
+open(os.path.join(home["host-b"], "asleep"), "w").close()
+open(os.path.join(home["host-b"], "hours"), "w").write('{"left": 40, "keep": 40, "why": "86 used in the last 24 hours, and 14 a day lasts to the reset"}')
+sleeper = ("--label", "for the sleeper", "--among", "host-b", "--take", "--no-wake", "--key", "k3", "--launcher", "thread-3")
+woken = len(lines(os.path.join(home["host-b"], "wakes")))
+code, pl, raw = placed(*sleeper)
+check("how many plan-hours are kept can be the hours command's to say, with its reason: 40 left, 40 kept, no wake", code == 1 and pl.get("queued") is True
+      and "40.0 plan-hours are left and 40.0 are kept (86 used in the last 24 hours, and 14 a day lasts to the reset)" in pl.get("reason", "")
+      and "for host-b" in pl.get("reason", ""), raw)
+code, out, err = fs("pool")
+check("and `fairshare pool` shows that it may not be woken now", "40.0 plan-hours left, 40.0 kept: no wake now." in out, out + err)
+fs("queue", "move")
+check("it is not offered a machine that may not be woken", not lines(os.path.join(root, "told.jsonl")), lines(os.path.join(root, "told.jsonl")))
+open(os.path.join(home["host-b"], "hours"), "w").write('{"left": 40, "keep": 12, "why": "2 used in the last 24 hours"}')
+fs("queue", "move")
+told = [json.loads(l) for l in lines(os.path.join(root, "told.jsonl"))]
+check("once the plan-hours allow a wake it is offered the sleeping machine, which is not woken for the offer", len(told) == 1 and told[0]["entry"]["machine"] == "host-b"
+      and len(lines(os.path.join(home["host-b"], "wakes"))) == woken, told)
+code, pl, raw = placed(*sleeper)
+check("sent again and asked not to wake, the caller is told the machine sleeps", code == 0 and pl.get("machine") == "host-b" and pl.get("asleep") is True
+      and len(lines(os.path.join(home["host-b"], "wakes"))) == woken, raw)
+code, out, err = fs("pool", "wake", "host-b", "--json")
+got = json.loads(out) if out.startswith("{") else {}
+check("`pool wake` wakes a machine by its name, with its own wake command", code == 0 and got.get("ok") is True and got.get("machine") == "host-b"
+      and len(lines(os.path.join(home["host-b"], "wakes"))) == woken + 1, out + err)
+code, out, err = fs("pool", "wake", "host-a")
+check("a machine that answers already is not woken again", code == 0 and "host-a is awake" in out, out + err)
+code, out, err = fs("pool", "wake", "nobody")
+check("and a name that is no machine is an error", code == 2 and "no machine nobody in the pool" in err, out + err)
+# "That machine" without its name: by what its extra holds.
+reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
+code, pl, raw = placed("--where", "t3_env=env-a")
+check("work that asks for the machine holding a T3 environment goes there, though the PC has more room", code == 0 and pl.get("machine") == "host-a"
+      and "pc is not open to it (not the machine this work asks for (t3_env))" in pl.get("reason", ""), raw)
+code, pl, raw = placed("--where", "t3_env=no-such")
+check("and nowhere when no machine holds it", code == 1 and not pl.get("ok"), raw)
+# A run whose caller can run it here itself: it runs only when it goes elsewhere.
+went = os.path.join(root, "placed.json")
+reading("host-a", 7.9)
+code, out, err = fs("pool", "run", "--repo", "demo", "--elsewhere", "--placed", went, "--as", "Demo  Gate", "--", *where)
+left = [g for g in (json.load(open(os.path.join(home["pc"], "grants.json"))) if os.path.exists(os.path.join(home["pc"], "grants.json")) else []) if g.get("kind") == "run"]
+check("with the most room on this machine, `pool run --elsewhere` runs nothing, exits 70 and leaves nothing counted", code == 70 and out == ""
+      and json.load(open(went)).get("local") is True and left == [], out + err + str(left))
+reading("pc", 17.9, processors=24, reserved=4, state="active", system="windows")
+reading("host-a", 0.5)
+code, out, err = fs("pool", "run", "--repo", "demo", "--elsewhere", "--placed", went, "--as", "Demo  Gate", "--", *where)
+last = [json.loads(l) for l in lines(os.path.join(home["pc"], "decisions.jsonl"))][-1]
+check("with room elsewhere it runs there, the placement is written first, and it is learned under the name given", code == 0 and out == os.path.realpath(host_repo)
+      and json.load(open(went)).get("machine") == "host-a" and json.load(open(went)).get("extra") == {"t3_env": "env-a"} and last.get("what") == "demo gate", out + err + str(last))
+# As it was: the line empty, nothing counted, host-b asleep with hours nobody can read.
+for name in ("queue.json", "grants.json", "settings.json"):
+    for h in ("pc", "host-a", "host-b"):
+        os.path.exists(os.path.join(home[h], name)) and os.remove(os.path.join(home[h], name))
+open(os.path.join(home["host-b"], "asleep"), "w").close()
+open(os.path.join(home["host-b"], "hours"), "w").write("who knows")
+
 # What work takes is learned, each machine's own, and the pool passes it on. host-a has run this
 # repo's gate for an hour at 6 processors; the PC has never run it.
 gate = "bun run gate"

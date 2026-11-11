@@ -55,6 +55,8 @@ type queued struct {
 	learned []level
 	// Machines are the machines it can run on, by name; none means only this one.
 	Machines []string `json:"machines,omitempty"`
+	// Folder says it runs in its repo's folder, so only a machine that has it can take it.
+	Folder bool `json:"folder,omitempty"`
 	// Need is what it counted as on this machine when it joined, and again when it was offered room.
 	Need     Need      `json:"need"`
 	QueuedAt time.Time `json:"queued_at"`
@@ -288,10 +290,11 @@ func tell(s Settings, n notice) error {
 	return err
 }
 
-// askPlace is the placer that runs the settings' queue_place command.
+// askPlace is the placer for the line: the settings' queue_place command when one is set, else
+// the pool.
 func askPlace(s Settings) placer {
 	if len(s.QueuePlace) == 0 {
-		return nil
+		return poolPlacer()
 	}
 	return func(e queued, local *Verdict, usable []string) string {
 		out, err := command(s.QueuePlace, map[string]any{"entry": e, "local": local, "usable": usable}, 25*time.Second)

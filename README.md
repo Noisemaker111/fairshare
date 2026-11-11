@@ -204,6 +204,10 @@ fairshare pool join --name t3-host-2 --via "boat ssh <id>" --wake "boat resume <
 fairshare pool join --mesh       every device of a Hona/mesh mesh joins, and the pool follows the mesh
 fairshare pool place --repo owl-go --take --json
                                  where a thread goes: exit 0 and the machine, 1 no machine takes it, 2 cannot tell
+fairshare pool place --repo owl-go --folder --take --no-wake --key K --launcher T --request - --json
+                                 a launch: it waits in the line when no machine has room, and goes to the
+                                 machine held for it when it is sent again
+fairshare pool wake t3-host-2    wake a machine that `--no-wake` named asleep
 fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install && bun run gate"
                                  a gate or a build, run where there is room, on exactly that commit
 ```
@@ -226,17 +230,33 @@ fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install &
   measured.
 - **Plan-hours.** A machine with a `wake` command that does not answer is asleep. It is woken
   only when no machine that is awake has room, and when it has an `hours` command, only while
-  that prints more plan-hours left than the member's `keep_hours`. Hours that cannot be read are
+  that prints more plan-hours left than are kept. How many are kept is the member's `keep_hours`,
+  or more when the command says so itself (`{"left": n, "keep": k, "why": "..."}`): a plan that
+  has to last to its reset keeps more on a day that used much, and only the command knows the
+  plan. `fairshare pool` shows a machine that may not be woken now. Hours that cannot be read are
   never spent.
 - **What work needs.** `--needs windows,deploy` keeps work on machines that are that OS or were
-  joined with `--can deploy`; `--among a,b` on the machines named. A run in a repo goes only to a
-  machine that has the repo's folder, checked on the machine at that moment.
+  joined with `--can deploy`; `--among a,b` on the machines named; `--where env=<id>` on the
+  machine whose `extra` holds that, which is how a caller says "that machine" without knowing any
+  machine's name. A run in a repo, and a launch placed with `--folder`, goes only to a machine
+  that has the repo's folder, checked on the machine at that moment.
+- **A launch can wait.** `pool place` with `--key`, `--launcher` and `--request` is a launch: when
+  no machine has room it joins the line (`fairshare queue`) for the machines open to it, and it
+  does not pass a launch already waiting for the same machine unless it is urgent. The meter asks
+  the pool for the front of the line (no `queue_place` command is needed), holds the room on the
+  machine that has it, counts it there, and tells the launcher; the same launch sent again goes
+  to that machine. A machine held asleep is woken by `pool place`, or with `--no-wake` named for
+  the caller, who wakes it with `fairshare pool wake <name>`. Why: until 2026-11-11 a hook did
+  all of this, asked each host by its folder and knew every host by name.
 - **A run.** `pool run` runs the command in the repo's folder on the machine picked, through that
   machine's own fairshare, and its exit is the command's (69 when the pool could not run it).
   The command is the work: it is learned under its own words (without the shell in front and the
   commit ids and long numbers that change from run to run), with how long it lasts, and it counts
   on its machine for as long as it runs. A placement that is run by its caller says so with
-  `pool place --run "<command>"`.
+  `pool place --run "<command>"`. `--as "<name>"` names a run whose words are a wrapper's (a
+  script sent with every call). `--placed <file>` writes where it went before it runs, for a
+  caller that has to fetch what the run left there. `--elsewhere` is for a caller that can run
+  the command here itself: when this machine has the most room nothing is run and the exit is 70.
   With `--commit` it runs in a fresh checkout of exactly that commit, which is removed after; the
   folder's own checkout is not touched. On a member with a `busy_dir` it leaves its process id
   there while it runs, so the machine's idle watch does not put it to sleep under the run.
@@ -250,11 +270,11 @@ The pool is `pool.json` in the home of the machine that places work. A member:
 | `fairshare` | the fairshare program there; unset, `fairshare` on its PATH |
 | `wake` | run on this machine when it does not answer; without it a silent machine is skipped |
 | `awake`, `awake_match` | run on this machine before anything is sent: up when it exits 0 and prints what the pattern finds. For a carrier that wakes a sleeping machine just by being used |
-| `hours`, `keep_hours` | prints its plan-hours left (a number or `{"left": n}`); it is woken only above `keep_hours` |
+| `hours`, `keep_hours` | prints its plan-hours left (a number, `{"left": n}`, or `{"left": n, "keep": k, "why": "..."}`); it is woken only while more are left than are kept |
 | `can` | what it can do beyond its OS, for `--needs` |
 | `work`, `repos` | the folder that holds its repos, and folders for repos kept somewhere else |
 | `busy_dir` | a folder its idle watch reads for running work |
-| `extra` | handed back with a placement, for the caller (a T3 environment id) |
+| `extra` | handed back with a placement, for the caller (a T3 environment id, a project id per repo), and what `--where` matches |
 
 `ask_seconds` (20) is how long a machine has to answer and `wake_seconds` (280) how long a wake
 may take.

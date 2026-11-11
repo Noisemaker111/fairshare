@@ -33,6 +33,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +49,10 @@ import (
 // cannotRun is the exit of `pool run` and `pool here` when the pool, not the command, failed.
 const cannotRun = 69
 
+// runsHere is the exit of `pool run --elsewhere` when this machine has the most room: nothing was
+// run, and the caller runs it itself.
+const runsHere = 70
+
 // member is one machine in the pool.
 type member struct {
 	Name string `json:"name"`
@@ -62,8 +67,11 @@ type member struct {
 	// machine just by being used, which would spend plan-hours on every question.
 	Awake      []string `json:"awake,omitempty"`
 	AwakeMatch string   `json:"awake_match,omitempty"`
-	// Hours is run here before a wake and prints the plan-hours left (a number, or {"left": n}).
-	// The machine is woken only while more than KeepHours are left.
+	// Hours is run here before a wake and prints the plan-hours left: a number, or {"left": n},
+	// or {"left": n, "keep": k, "why": "..."} when how many are kept is the command's to say (a
+	// plan that has to last to its reset keeps more on a day that used much). The machine is
+	// woken only while more are left than are kept: the command's keep, and never less than
+	// KeepHours.
 	Hours     []string `json:"hours,omitempty"`
 	KeepHours float64  `json:"keep_hours,omitempty"`
 	// Can is what the machine can do beyond its OS ("gpu", "deploy"); work that needs one of them
@@ -361,8 +369,32 @@ type work struct {
 	Needs []string
 	// Among, when set, is the only machines it may go to.
 	Among []string
+	// Where is what a machine's Extra must hold for the work to go there (a T3 environment id):
+	// how a caller says "that machine" without knowing any machine's name.
+	Where map[string]string
+	// Shut are the machines, by their name in the line, that launches already waiting in the line
+	// could use: work that arrives now does not pass them.
+	Shut []string
 	// Folder says the work runs in the repo's folder, so the machine must have it.
 	Folder bool
+}
+
+// lineName is the member's name in the line, where this machine is always `here`.
+func lineName(m member) string {
+	if len(m.Via) == 0 {
+		return here
+	}
+	return m.Name
+}
+
+// byLine is the member a name in the line stands for.
+func (p poolFile) byLine(name string) (member, bool) {
+	for _, m := range p.Members {
+		if lineName(m) == name {
+			return m, true
+		}
+	}
+	return member{}, false
 }
 
 // roomArgs is the question for one member: `fairshare room`, as a launch asks it. seen is what
@@ -413,6 +445,14 @@ func (w work) roomArgs(m member, take bool, seen *Sizing) []string {
 func open(m member, w work) (bool, string) {
 	if len(w.Among) > 0 && !slices.Contains(w.Among, m.Name) {
 		return false, "not one of the machines this work may use"
+	}
+	for k, v := range w.Where {
+		if m.Extra[k] != v {
+			return false, "not the machine this work asks for (" + k + ")"
+		}
+	}
+	if slices.Contains(w.Shut, lineName(m)) {
+		return false, "launches already wait in the line for it"
 	}
 	for _, need := range w.Needs {
 		if need == "desktop" {
@@ -687,40 +727,58 @@ func best(answers []reply) int {
 	return at
 }
 
-// readHours reads what a member's hours command printed: a number, or {"left": n}.
-func readHours(out []byte) (float64, bool) {
+// planHours is what a member's hours command said: the plan-hours left, how many of them are
+// kept, and why that many when the command says so itself.
+type planHours struct {
+	Left, Keep float64
+	Why        string
+	Known      bool
+}
+
+// readHours reads what a member's hours command printed: a number, {"left": n}, or {"left": n,
+// "keep": k, "why": "..."}.
+func readHours(out []byte) planHours {
 	text := strings.TrimSpace(string(out))
 	if v, err := strconv.ParseFloat(text, 64); err == nil {
-		return v, true
+		return planHours{Left: v, Known: true}
 	}
 	var got struct {
 		Left *float64 `json:"left"`
+		Keep float64  `json:"keep"`
+		Why  string   `json:"why"`
 	}
 	if json.Unmarshal(jsonPart(out), &got) == nil && got.Left != nil {
-		return *got.Left, true
+		return planHours{Left: *got.Left, Keep: got.Keep, Why: got.Why, Known: true}
 	}
-	return 0, false
+	return planHours{}
 }
 
 // mayWake says whether a sleeping machine with plan-hours may be woken: only while more are left
 // than it keeps, and never when they could not be read.
-func mayWake(left float64, known bool, keep float64) (bool, string) {
-	if !known {
+func mayWake(h planHours) (bool, string) {
+	if !h.Known {
 		return false, "its plan-hours could not be read, so it stays asleep"
 	}
-	if left <= keep+1e-9 {
-		return false, fmt.Sprintf("%.1f plan-hours are left and %.1f are kept, so it stays asleep", left, keep)
+	if h.Left <= h.Keep+1e-9 {
+		why := ""
+		if h.Why != "" {
+			why = " (" + h.Why + ")"
+		}
+		return false, fmt.Sprintf("%.1f plan-hours are left and %.1f are kept%s, so it stays asleep", h.Left, h.Keep, why)
 	}
-	return true, fmt.Sprintf("%.1f plan-hours left", left)
+	return true, fmt.Sprintf("%.1f plan-hours left", h.Left)
 }
 
-// hoursLeft runs the member's hours command.
-func hoursLeft(p poolFile, m member) (float64, bool) {
+// hoursLeft runs the member's hours command. What is kept is the most of what the command says
+// and what the member was joined with.
+func hoursLeft(p poolFile, m member) planHours {
 	out, err := command(m.Hours, nil, p.askTime())
 	if err != nil {
-		return 0, false
+		return planHours{}
 	}
-	return readHours(out)
+	h := readHours(out)
+	h.Keep = max(h.Keep, m.KeepHours)
+	return h
 }
 
 // placement is the pool's answer for a piece of work.
@@ -730,9 +788,13 @@ type placement struct {
 	Local   bool   `json:"local,omitempty"`
 	// Asleep says the machine was picked asleep and the caller wakes it (--no-wake); Woke that the
 	// pool woke it; Took that the work is counted there until its load shows.
-	Asleep   bool              `json:"asleep,omitempty"`
-	Woke     bool              `json:"woke,omitempty"`
-	Took     bool              `json:"took,omitempty"`
+	Asleep bool `json:"asleep,omitempty"`
+	Woke   bool `json:"woke,omitempty"`
+	Took   bool `json:"took,omitempty"`
+	// Queued says no machine had room and the launch waits in the line, at Place of Of.
+	Queued   bool              `json:"queued,omitempty"`
+	Place    int               `json:"place,omitempty"`
+	Of       int               `json:"of,omitempty"`
 	Reason   string            `json:"reason"`
 	Extra    map[string]string `json:"extra,omitempty"`
 	Machines []reply           `json:"machines"`
@@ -780,8 +842,7 @@ func place(p poolFile, w work, take bool, wake func(member) error) placement {
 			continue
 		}
 		if len(m.Hours) > 0 {
-			left, known := hoursLeft(p, m)
-			ok, why := mayWake(left, known, m.KeepHours)
+			ok, why := mayWake(hoursLeft(p, m))
 			if !ok {
 				answers[i].Why = why
 				continue
@@ -816,6 +877,230 @@ func wakeMember(p poolFile) func(member) error {
 	return func(m member) error {
 		_, err := command(m.Wake, nil, p.wakeTime())
 		return err
+	}
+}
+
+// wakeNamed wakes one member by name and returns it as it is once awake: a wake may make the
+// machine join again, with what it knows now (a host's projects), so the pool is read again.
+func wakeNamed(p poolFile, name string) (member, error) {
+	at := slices.IndexFunc(p.Members, func(m member) bool { return m.Name == name })
+	if at < 0 {
+		return member{}, fmt.Errorf("no machine %s in the pool", name)
+	}
+	m := p.Members[at]
+	if _, _, err := reading(p, m); err == nil {
+		return m, nil // it answers already
+	}
+	if len(m.Wake) == 0 {
+		return m, fmt.Errorf("%s does not answer and has no wake command", name)
+	}
+	if err := wakeMember(p)(m); err != nil {
+		return m, fmt.Errorf("%s did not wake: %w", name, err)
+	}
+	if again, err := readPool(); err == nil {
+		if at := slices.IndexFunc(again.Members, func(o member) bool { return o.Name == name }); at >= 0 {
+			p, m = again, again.Members[at]
+		}
+	}
+	var err error
+	for try := 0; try < 4; try++ {
+		if _, _, err = reading(p, m); err == nil {
+			return m, nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return m, fmt.Errorf("%s was woken and still does not answer: %w", name, err)
+}
+
+// waitedFor are the machines, by their name in the line, that a launch still waiting in the line
+// could use.
+func waitedFor(q []queued) []string {
+	var out []string
+	for _, e := range q {
+		if e.State == "offered" {
+			continue
+		}
+		for _, m := range e.machines() {
+			if !slices.Contains(out, m) {
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// lineMachines are the machines a launch that found no room may wait for, by their name in the
+// line: every machine open to it, but for those that said themselves it cannot run there (no
+// folder for its repo) and those that never answer.
+func lineMachines(p poolFile, w work, answers []reply) []string {
+	any := w
+	any.Shut = nil
+	var out []string
+	for i, m := range p.Members {
+		if ok, _ := open(m, any); !ok {
+			continue
+		}
+		shut := slices.Contains(w.Shut, lineName(m))
+		if !shut && (answers[i].State == "closed" || answers[i].State == "unreachable") {
+			continue
+		}
+		out = append(out, lineName(m))
+	}
+	return out
+}
+
+// placeLaunch places a launch, which unlike a run can wait: with a key and a launcher, a launch
+// no machine has room for joins the line for the machines open to it, and the same launch sent
+// again once it was told its turn goes to the machine held for it. A launch does not pass one
+// already waiting for the same machine, unless it is urgent.
+//
+// Why: until 2026-11-11 this was a hook's work (placement.py): it asked each machine by its
+// folder, kept the line's rule itself, and knew every host by name.
+func placeLaunch(p poolFile, w work, take bool, wake func(member) error, key, launcher string, body []byte) placement {
+	start := time.Now()
+	if key != "" {
+		if pl, mine := takeTurn(p, w, key, wake); mine {
+			pl.Seconds = round2(time.Since(start).Seconds())
+			return pl
+		}
+	}
+	s, err := loadSettings()
+	if err != nil {
+		s = defaultSettings()
+	}
+	if urgent, _ := isUrgent(w.Urgent, w.Label, w.Repo, s); !urgent {
+		w.Shut = waitedFor(loadQueue())
+	}
+	pl := place(p, w, take, wake)
+	if pl.OK || key == "" || launcher == "" || exitOf(pl) != 1 {
+		return pl
+	}
+	machines := lineMachines(p, w, pl.Machines)
+	if len(machines) == 0 {
+		return pl // no machine could ever run it: waiting would not help
+	}
+	e := queued{Key: key, Launcher: launcher, Title: w.Label, Count: max(w.Count, 1), Checkout: w.Checkout, Repo: w.Repo, Folder: w.Folder, Machines: machines, QueuedAt: start}
+	for i, m := range p.Members {
+		if v := pl.Machines[i].verdict; v != nil && len(m.Via) == 0 {
+			e.Need = Need{v.CPU.Need, v.Mem.Need, v.Disk.Need} // what it counts as here, for the launches behind it
+		}
+	}
+	err = withLock(func() error {
+		after, at, added := join(loadQueue(), e, body)
+		pl.Queued, pl.Place, pl.Of = true, at, len(after)
+		if !added {
+			return nil
+		}
+		return saveQueue(after)
+	})
+	if err != nil {
+		pl.Queued = false
+		pl.Reason += " degraded: it could not join the line: " + err.Error()
+		return pl
+	}
+	pl.Reason += fmt.Sprintf(" It is in the line, place %d of %d, for %s: fairshare asks those machines again and tells %s the moment one has room; send the same launch again then and it goes straight there. Do not send it again before that.",
+		pl.Place, pl.Of, strings.Join(machines, ", "), launcher)
+	if len(s.QueueNotify) == 0 {
+		pl.Reason += " degraded: queue_notify is not set, so nobody will be told; `fairshare queue` shows the line."
+	}
+	return pl
+}
+
+// takeTurn answers for a launch that is already in the line: it still waits, or its turn came and
+// it goes to the machine held for it. mine is false when it is not in the line.
+func takeTurn(p poolFile, w work, key string, wake func(member) error) (pl placement, mine bool) {
+	var got queued
+	err := withLock(func() error {
+		q := loadQueue()
+		at, e := position(q, key)
+		if e == nil {
+			return nil
+		}
+		mine, got = true, *e
+		if e.State != "offered" {
+			pl = placement{Queued: true, Place: at, Of: len(q), Reason: fmt.Sprintf("\"%s\" is already in the line, place %d of %d, waiting %.0f minutes. It is not lost: fairshare tells %s the moment a machine has room, and it goes in then. Do not send it again before that.",
+				e.Title, at, len(q), time.Since(e.QueuedAt).Minutes(), e.Launcher)}
+			return nil
+		}
+		if err := saveQueue(append(q[:at-1], q[at:]...)); err != nil {
+			return err
+		}
+		if got.Machine == "" || got.Machine == here {
+			s, _ := loadSettings()
+			takeGrant(time.Now(), settle(s), grant{Need: got.Need, Label: got.Title, Repo: got.Repo, Count: got.Count})
+		}
+		appendLine("decisions.jsonl", map[string]any{"at": time.Now().UTC(), "event": "claimed", "id": got.ID, "title": got.Title,
+			"machine": got.Machine, "waited_minutes": time.Since(got.QueuedAt).Minutes()}, 8<<20)
+		return nil
+	})
+	if err != nil {
+		return placement{Reason: "degraded: the line could not be read: " + err.Error()}, true
+	}
+	if !mine || pl.Queued {
+		return pl, mine
+	}
+	name := got.Machine
+	if name == "" {
+		name = here
+	}
+	m, known := p.byLine(name)
+	if !known {
+		// The machine left the pool while the launch waited: it is placed as new.
+		return placement{}, false
+	}
+	pl = placement{OK: true, Machine: m.Name, Local: len(m.Via) == 0, Extra: m.Extra, Took: true, member: m,
+		Reason: fmt.Sprintf("%s takes it: it waited in the line %.0f minutes and room was held for it there.", m.Name, time.Since(got.QueuedAt).Minutes())}
+	if pl.Local {
+		return pl, true
+	}
+	// Counted there too, until it is seen running; a machine held asleep is woken first.
+	a := askRoom(p, m, w, true, nil)
+	if a.State == "asleep" || a.State == "unreachable" {
+		if wake == nil {
+			pl.Asleep = true
+		} else if err := wake(m); err != nil {
+			pl.Reason += " degraded: it did not wake: " + err.Error()
+			pl.Asleep = true
+		} else {
+			pl.Woke = true
+		}
+	}
+	return pl, true
+}
+
+// poolPlacer is the placer for the line when the settings name no queue_place command: the pool
+// itself. nil when no machine has joined, and the line is then this machine's alone.
+func poolPlacer() placer {
+	p, err := loadPool()
+	if err != nil {
+		return nil
+	}
+	return func(e queued, local *Verdict, usable []string) string {
+		if len(usable) == 1 && usable[0] == here {
+			// Only this machine is left to it, and its answer is already known.
+			if local != nil && local.OK {
+				return here
+			}
+			return ""
+		}
+		w := work{Label: e.Title, Repo: e.Repo, Count: e.Count, Checkout: e.Checkout, Folder: e.Folder && e.Repo != ""}
+		for _, name := range usable {
+			if m, ok := p.byLine(name); ok {
+				w.Among = append(w.Among, m.Name)
+			}
+		}
+		if len(w.Among) == 0 {
+			return ""
+		}
+		pl := place(p, w, false, nil)
+		record(pl, w)
+		if !pl.OK {
+			return ""
+		}
+		if !pl.Local && !pl.Asleep {
+			askRoom(p, pl.member, w, true, nil) // held there as it is held here: counted until it shows
+		}
+		return lineName(pl.member)
 	}
 }
 
@@ -878,6 +1163,9 @@ func placeWords(pl placement, answers []reply, picked int) string {
 func exitOf(pl placement) int {
 	if pl.OK {
 		return 0
+	}
+	if pl.Queued {
+		return 1
 	}
 	answered := false
 	for _, a := range pl.Machines {
@@ -943,10 +1231,12 @@ func workFlags(fs *flag.FlagSet) func() work {
 	threads := fs.String("threads", "", "agent threads open on each machine now: pc=7,host=2")
 	needs := fs.String("needs", "", "what the machine must be or can do: windows,gpu,deploy; desktop for work that drives the screen")
 	among := fs.String("among", "", "the only machines it may go to")
+	where := fs.String("where", "", "only a machine whose extra holds these: k=v,...")
+	folder := fs.Bool("folder", false, "only a machine that has the repo's folder")
 	run := fs.String("run", "", "the work is a run of this command, for a caller that places it and runs it itself")
 	return func() work {
 		w := work{Label: *label, Repo: *repo, Count: *count, Checkout: *checkout, Urgent: *urgent,
-			Explicit: Need{*cores, *memGB, *diskGB}, Needs: list(*needs), Among: list(*among)}
+			Explicit: Need{*cores, *memGB, *diskGB}, Needs: list(*needs), Among: list(*among), Where: pairs(*where), Folder: *folder && *repo != ""}
 		if *run != "" {
 			w.Kind, w.What = "run", runName(strings.Fields(*run))
 		}
@@ -973,6 +1263,7 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
                                      --work <folder> --repos name=folder,... --busy-dir <folder> --extra k=v,...
   fairshare pool join --mesh         every device of the mesh (Hona/mesh) joins, and the pool follows the mesh
   fairshare pool leave <name>        a machine leaves
+  fairshare pool wake <name>         wake a machine that pool place --no-wake named asleep (--json: its extra, as it is once awake)
   fairshare pool place [flags]       where a piece of work goes: exit 0 and the machine, 1 the pool is full, 2 cannot tell
       --repo R --count N --checkout --urgent --disk-gb X --label "<what>"
       --cores X --mem-gb X           a guess, used only until work like this is measured: each machine
@@ -981,14 +1272,26 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
       --needs desktop                the work opens windows on the screen, moves the pointer or captures it:
                                      it starts only while nobody is at the PC, one piece at a time
       --among a,b                    only these machines
+      --where k=v                    only a machine whose extra holds this (a T3 environment id): "that machine",
+                                     said without its name
+      --folder                       only a machine that has --repo's folder
       --run "<command>"              the work is a run of this command, not a thread (pool run says so itself)
       --take                         count the work on the machine picked until it is seen running
       --no-wake                      name a sleeping machine instead of waking it
+      --key K --launcher T --request <file|->
+                                     a launch: when no machine has room it waits in the line (fairshare queue) for
+                                     the machines open to it, T is told when one has room, and the same launch sent
+                                     again goes to the machine held for it. It does not pass a launch already
+                                     waiting for the same machine.
       --json
   fairshare pool run [flags] -- <command>
                                      run a command where there is room: in --repo's folder, on --commit when given;
                                      --wait N keeps asking for N minutes. The command's exit, or 69 when the pool failed.
                                      It counts as what that command was measured using, and for as long as it runs.
+      --as "<name>"                  what the run is called when its words are a wrapper's, not the command's
+      --placed <file>                write where it went (the placement, as JSON) before it runs
+      --elsewhere                    for a caller that can run it here itself: when this machine has the most room,
+                                     run nothing and exit 70
 `
 
 func cmdPool(args []string) int {
@@ -1035,6 +1338,9 @@ func cmdPool(args []string) int {
 		get := workFlags(fs)
 		take := fs.Bool("take", false, "count the work on the machine picked")
 		noWake := fs.Bool("no-wake", false, "name a sleeping machine instead of waking it")
+		key := fs.String("key", "", "what names this launch; the same launch sent again carries the same key")
+		launcher := fs.String("launcher", "", "the thread that asks, told when a machine has room")
+		request := fs.String("request", "", "the launch exactly as sent (file or -), kept with it in the line")
 		asJSON := fs.Bool("json", false, "print the whole answer as JSON")
 		fs.Parse(args[1:])
 		p, err := loadPool()
@@ -1048,7 +1354,13 @@ func cmdPool(args []string) int {
 		if *noWake {
 			wake = nil
 		}
-		pl := place(p, get(), *take, wake)
+		var body []byte
+		if *request == "-" {
+			body, _ = io.ReadAll(os.Stdin)
+		} else if *request != "" {
+			body, _ = os.ReadFile(*request)
+		}
+		pl := placeLaunch(p, get(), *take, wake, *key, *launcher, body)
 		record(pl, get())
 		if *asJSON {
 			printJSON(pl)
@@ -1056,6 +1368,29 @@ func cmdPool(args []string) int {
 			fmt.Println(pl.Reason)
 		}
 		return exitOf(pl)
+	case "wake":
+		asJSON := slices.Contains(args, "--json")
+		names := slices.DeleteFunc(slices.Clone(args[1:]), func(a string) bool { return strings.HasPrefix(a, "--") })
+		if len(names) != 1 {
+			return fail(errors.New("pool wake <name>"))
+		}
+		p, err := loadPool()
+		if err != nil {
+			return fail(err)
+		}
+		m, err := wakeNamed(p, names[0])
+		if err != nil {
+			if asJSON {
+				printJSON(map[string]any{"ok": false, "machine": names[0], "degraded": err.Error()})
+			}
+			return fail(err)
+		}
+		if asJSON {
+			printJSON(map[string]any{"ok": true, "machine": m.Name, "extra": m.Extra})
+		} else {
+			fmt.Printf("fairshare: %s is awake\n", m.Name)
+		}
+		return 0
 	case "run":
 		return poolRun(args[1:])
 	case "here":
@@ -1201,6 +1536,8 @@ func poolStatus(p poolFile, asJSON bool) int {
 		Presence   string   `json:"presence,omitempty"`
 		MemFreeGB  float64  `json:"mem_free_gb"`
 		HoursLeft  *float64 `json:"hours_left,omitempty"`
+		HoursKept  float64  `json:"hours_kept,omitempty"`
+		HoursWhy   string   `json:"hours_why,omitempty"`
 		Via        string   `json:"via,omitempty"`
 	}
 	rows := make([]row, len(p.Members))
@@ -1223,8 +1560,8 @@ func poolStatus(p poolFile, asJSON bool) int {
 				r.Presence, r.MemFreeGB = v.Reading.Presence.State, v.Reading.MemAvailGB
 			}
 			if len(m.Hours) > 0 {
-				if left, known := hoursLeft(p, m); known {
-					r.HoursLeft = &left
+				if h := hoursLeft(p, m); h.Known {
+					r.HoursLeft, r.HoursKept, r.HoursWhy = &h.Left, h.Keep, h.Why
 				}
 			}
 			rows[i] = r
@@ -1282,7 +1619,12 @@ func poolStatus(p poolFile, asJSON bool) int {
 			note = tail(r.Why, 90)
 		}
 		if r.HoursLeft != nil {
-			note = strings.TrimSpace(fmt.Sprintf("%.1f plan-hours left. %s", *r.HoursLeft, note))
+			hours := fmt.Sprintf("%.1f plan-hours left.", *r.HoursLeft)
+			if r.HoursKept >= *r.HoursLeft {
+				// It may not be woken now, and the note is where that is seen before work needs it.
+				hours = fmt.Sprintf("%.1f plan-hours left, %.1f kept: no wake now.", *r.HoursLeft, r.HoursKept)
+			}
+			note = strings.TrimSpace(hours + " " + note)
 		}
 		if r.verdict == nil {
 			fmt.Printf("  %-26.26s %-12s %-8s %5d %5s %6s %7s %6s %6s %7s  %s\n", r.Name, r.State, r.OS, r.Processors, "-", "-", "-", "-", "-", "-", note)
@@ -1300,6 +1642,9 @@ func poolRun(args []string) int {
 	get := workFlags(fs)
 	commit := fs.String("commit", "", "run it in a checkout of exactly this commit of --repo")
 	wait := fs.Float64("wait", 0, "minutes to keep asking while the pool is full")
+	as := fs.String("as", "", "what the run is called, when its words are a wrapper's")
+	placedFile := fs.String("placed", "", "write where it went, as JSON, before it runs")
+	elsewhere := fs.Bool("elsewhere", false, "when this machine has the most room, run nothing and exit 70")
 	fs.Parse(args)
 	argv := fs.Args()
 	stop := func(format string, a ...any) int {
@@ -1315,6 +1660,10 @@ func poolRun(args []string) int {
 	}
 	w.Folder = w.Repo != ""
 	w.Kind, w.What = "run", runName(argv)
+	if name := strings.Join(strings.Fields(strings.ToLower(*as)), " "); name != "" {
+		// A wrapper's words (a script sent with every call, a commit id) name nothing that lasts.
+		w.What = runName([]string{name})
+	}
 	if *commit != "" && w.Repo == "" {
 		return stop("--commit needs --repo")
 	}
@@ -1338,6 +1687,19 @@ func poolRun(args []string) int {
 	}
 	m := pl.member
 	fmt.Fprintf(os.Stderr, "fairshare: %s (placed in %.1f s)\n", pl.Reason, pl.Seconds)
+	if *placedFile != "" {
+		if b, err := json.Marshal(pl); err != nil || os.WriteFile(*placedFile, b, 0o644) != nil {
+			return stop("could not write where it went to %s", *placedFile)
+		}
+	}
+	if *elsewhere && pl.Local {
+		// The caller runs it here itself, inside its own thread, which is how it is measured: it
+		// does not go on counting as a run still to come.
+		if s, err := loadSettings(); err == nil {
+			endGrant("run", w.Repo, time.Now(), settle(s))
+		}
+		return runsHere
+	}
 	mark := &runMark{Repo: w.Repo, What: w.What, Label: w.Label, Desktop: slices.Contains(w.Needs, "desktop")}
 	for _, a := range pl.Machines {
 		if a.Name == m.Name && a.verdict != nil {

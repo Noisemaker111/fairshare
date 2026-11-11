@@ -51,15 +51,23 @@ old counts; `fairshare install` puts it back.
 
 ## Who asks it
 
-- `~/.claude/hooks/thread-cap.py` (Claude Code and Codex, before a T3 thread starts) decides
-  where a launch runs through `~/.claude/hooks/placement.py`: the PC (`fairshare room`) or any
-  boat host that has the repo (`boat-host.sh --conf <dir> room`), whichever has room, and the
-  line (`fairshare queue add --machines ...`) when none has. `place-on-host.py` moves the launch
-  to the host that was picked. Tests: `test_thread_cap.py`, `test_placement.py`,
-  `test_place_on_host.py` in the same folder.
-- `~/.claude/hooks/fairshare-place.py` is this PC's `queue_place` (the same choice for a launch
-  that waited) and `fairshare-order.py` its `queue_order`: the launches the manager lists in
-  `~/.config/t3-manager/goals.json` "pending" go first, in that list's order.
+- `~/.claude/hooks/thread-cap.py` (Claude Code and Codex, before a T3 thread starts) asks the
+  pool where a launch runs through `~/.claude/hooks/placement.py`: one `fairshare pool place
+  --folder --take --no-wake --key --launcher --request -` per launch. It names no machine: `[pc]`
+  in a title is `--needs windows`, a launch that names a T3 environment is `--where env=<id>`.
+  `place-on-host.py` moves the launch to the machine the pool picked, by the `env` and
+  `project.<repo>` in that member's `extra`, waking it first with `fairshare pool wake`. Tests:
+  `test_thread_cap.py`, `test_placement.py`, `test_place_on_host.py` in the same folder.
+- This PC has no `queue_place`: the pool places the line. `fairshare-order.py` is its
+  `queue_order`: the launches the manager lists in `~/.config/t3-manager/goals.json` "pending" go
+  first, in that list's order.
+- `~/.agents/skills/boat-host/boat-host.sh pool` joins a boat host: its `via` is `boat-host.sh
+  --conf <dir> on` (boat's API, with the command's own exit code, which `boat ssh` loses), its
+  `wake` is `up`, its `hours` is `boat-host.sh hours` (the plan's hours and how many must be kept
+  for it to last to its reset), and its `extra` is its T3 environment and its project for each
+  repo. `up` runs it, so a new host is in the pool from its first `up`. `boat-host.sh gate` runs
+  a landing gate through `fairshare pool run --needs gate --elsewhere`: on the host with the most
+  room, or on this PC (exit 69, the landing runs it itself) when the PC has more.
 - `~/.claude/hooks/fairshare-offer.py` is this PC's `queue_notify`: it puts the notice in the
   manager's ping outbox (`notify-manager.py`), so a busy thread gets it when its turn ends.
 - `~/.agents/skills/boat-host/boat-host.sh up` copies `fairshare-linux` to each host as
@@ -109,6 +117,10 @@ old counts; `fairshare install` puts it back.
   split and quote a command differently, and a member is never a different code path per carrier.
 - A machine that costs plan-hours is woken only when no awake machine has room, and never when
   its hours cannot be read.
+- No caller names a machine. What a caller knows about where work must go is what the work needs
+  (`--needs`), what the machine must hold (`--where`, `--folder`), never a member's name; what a
+  caller needs back about the machine picked is in that member's `extra`. This machine is `pc`
+  in the line (`here`) whatever it is called in the pool (`lineName`).
 - When it cannot tell, it exits 2 with `degraded: <cause>`. It never answers from a stale reading.
 - Owl told is Owl having taken it. Owl answers a setting it does not have with an error in its
   JSON and exit 0, so `owlAgents` reads the answer, and nothing is recorded as held or kept that
