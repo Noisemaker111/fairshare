@@ -1,63 +1,54 @@
 # fairshare
 
-A Go command for Windows that runs AI agents' heavy work so it yields to the foreground, freezes
-instead of exhausting memory, and is computed once per code state. See `README.md`.
+A Go command for Windows and Linux that measures a machine and says whether it has room for more
+agent work, and on Windows works out how many processors to keep for the person at the PC. See
+`README.md`.
 
 ## Test
 
 ```
-go vet ./... && go test ./... && go build -o fairshare.exe .
+go vet ./... && GOOS=linux go vet ./... && go test ./... && go build -o fairshare.exe . && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o fairshare-linux .
 ```
 
-Run it as written or with its output sent to a file. `go test ./... | tail` passes on tail's exit code,
-so the `&&` after it builds anyway and a failing run looks green (2026-11-07).
+Run it as written or with its output sent to a file. `go test ./... | tail` passes on tail's exit
+code, so the `&&` after it builds anyway and a failing run looks green (2026-11-07).
 
-The bench is the real check of the foreground claim. It puts load on the whole PC, so keep runs
-under 10 minutes and never run it while Jon is gaming:
+`TestALookMeasuresThisPC` looks at the real PC with `FAIRSHARE_RESERVE=measure`, which works the
+reserve out and never tells Owl. A test never runs `install`, and never runs a meter without
+`FAIRSHARE_HOME` pointed at a temp folder: the meter for a home is one per home, and the real
+home's meter is the one every launch asks.
 
-```
-fairshare bench --jobs 50 --mode plain --units 1200 --threads 4 --mem 40 --spawn-every 20 --files 20 --pairs 3 --deadline 4m --out results/bench.jsonl
-fairshare bench --jobs 50 --mode fair  --units 1200 --threads 4 --mem 40 --spawn-every 20 --files 20 --pairs 3 --deadline 4m --out results/bench.jsonl
-```
+To see it live: `fairshare status`, then the launch hook the way T3 runs it,
+`echo '<a t3_thread_launch payload>' | python -I ~/.claude/hooks/thread-cap.py`. To see it fail:
+`fairshare install --uninstall`, wait 20 s, and the same hook says `degraded:` and judges by its
+old counts; `fairshare install` puts it back.
 
-Read "jobs on" against "jobs off" in the same run, never against another run: other sessions'
-load on this PC swings from 20% to 100% within minutes. The bench's on/off freezing and `run`'s
-memory freezing both suspend processes, so use `--pairs 0` when testing memory freezing.
+## Who asks it
 
-The thread shell is live: `fairshare install` puts `%LOCALAPPDATA%\fairshare\bin\fairshare.exe
-hook` in every Claude Code, Codex and OpenCode chat, and keeps that copy's `adopt` running for the
-whole PC (scheduled task `fairshare`). Claude and Codex chats read hooks from their config folder,
-and T3 Code starts them from their own (`homePath` in `~/.t3/userdata/settings.json`, such as
-`~/.claude-hub`), so install registers in each of those as well as `~/.claude` and `~/.codex`. A test
-that runs install sets `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, or it writes into the PC's real ones. Rebuilding `fairshare.exe` here doesn't change either; run
-`fairshare install` again to ship a change, then `fairshare throttle` to see adopt's chats.
-
-Tests run while that adopt governs this PC, including the test processes themselves; they must
-pass that way. A test's own `adopt` always takes `--pid`, and a test never runs `install` without
-`--hooks-only` (that would replace the PC's adopt).
+- `~/.claude/hooks/thread-cap.py` (Claude Code and Codex, before a T3 thread starts) asks
+  `fairshare room --take` for the PC and `boat-host.sh room` for a boat host. Its tests are
+  `~/.claude/hooks/test_thread_cap.py`.
+- `~/.agents/skills/boat-host/boat-host.sh up` copies `fairshare-linux` to each host as
+  `~/.agents-pc/fairshare`.
+- Owl applies the reserve: the meter runs `owl agents set reserve_processors <n> --for 3m
+  --real-home` with `OWL_CALLER=fairshare`.
 
 ## Rules
 
-- Everything a command starts must end up in a job Windows kills when its owner exits
-  (`killOnExitJob`, `Governor.NewUnit(true)`). `adopt` is the one exception: work it adopts must
-  survive it stopping. When a chat's own process exits, `adopt` ends everything left in its lane
-  (`lane.end`).
-- Put processes in jobs through a `jobSet` (jobset.go), never `AssignProcessToJobObject` directly.
-  A process already in a job can only join an empty job, and that nests the new job inside the old
-  one. Never place a process Windows is still starting (`procInfo.unstarted`: its one thread not
-  yet let run). Two jobs on a Store PowerShell in that window make its start fail with "Access is
-  denied"; judge it by the thread, never by a wait on the clock (see `unstarted`).
-- List processes with `snapshot()` / `scan()` (one NtQuerySystemInformation call), not Toolhelp,
-  which makes the same call and copies it: 5.4 ms against 2.5 ms per look.
-- Measure process CPU with `GetProcessTimes` (see `pidsCPU`), and time sub-millisecond work with
-  `nowMs` (the performance counter). Go's own clock on Windows moves in ~0.5 ms steps.
-- Windows calls go through `internal/windows`, never `golang.org/x/sys/windows`: that imports
-  `net`, whose init starts Winsock, 3 ms of every hook call (`TestNoNetInBinary`).
-- The hook runs on every agent tool call, so it never lists the whole PC (`snapshot`, 5 ms): it walks
-  its own ancestors with `liveProc`. Claude Code starts it in exec form (`command` + `args`); a
-  plain command line would go through Git Bash first, about 90 ms.
+- Nothing runs per agent command. The first version's per-command hook cost 130 to 160 ms a call
+  and broke commands; a launch is the only moment fairshare is asked.
+- fairshare reads and decides. It never sets a priority, puts a process in a job, suspends or
+  ends anything. Owl's keeper does the holding; fairshare only tells it the reserve.
+- No count of threads in the rule or the settings. A limit is a share of what a machine has, so
+  one settings file is right on every machine.
+- The room rule (`room.go`) and the reserve rule (`reserve.go`) are pure functions of a reading
+  and the settings, and every number in them is tested there. Windows calls live only in
+  `meter_windows.go`; Linux file reading only in `reading_linux.go`, with the parsing in
+  `linuxproc.go` so it is tested on Windows too.
+- When it cannot tell, it exits 2 with `degraded: <cause>`. It never answers from a stale reading.
+- Windows calls go through `syscall`, never `golang.org/x/sys/windows`, which imports `net`.
 
 ## Land
 
 Land through a pull request to `main` on GitHub (`origin`) after the test line passes, then run
-`fairshare install` from the merged build.
+`fairshare install` from the merged build and `boat-host.sh up` for each host that is running.
