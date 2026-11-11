@@ -108,9 +108,14 @@ type LiveWork struct {
 	// what work like it was measured using. Swing is how far its minutes stray from that.
 	Expect float64 `json:"expect"`
 	Swing  float64 `json:"swing"`
-	// MemGB is the memory it holds now and ExpectMemGB what it is expected to reach.
+	// MemGB is the memory it holds now and ExpectMemGB what it is expected to hold: its own
+	// minutes' average, and until it has enough of them, what work like it held. MemSwing is how
+	// far its minutes stray from that and MemMost the most it is expected to reach. A reading
+	// with the last two unset (a run known only by its mark) says only what it is expected to hold.
 	MemGB       float64 `json:"mem_gb"`
 	ExpectMemGB float64 `json:"expect_mem_gb"`
+	MemSwing    float64 `json:"mem_swing,omitempty"`
+	MemMost     float64 `json:"mem_most,omitempty"`
 	Processes   int     `json:"processes"`
 	// Desktop says it drives the desktop (room.go, desktopFree).
 	Desktop bool `json:"desktop,omitempty"`
@@ -246,8 +251,10 @@ type unit struct {
 	// The stretch being measured: processor-seconds, seconds, and the most memory in it.
 	cpu, seconds, memPeak float64
 	// Its own minutes so far, the recent ones counting for more: minutes, the sum of minutes
-	// times processors and times processors squared, and the most memory lately.
+	// times processors and times processors squared, the same two sums for memory, and the most
+	// memory lately.
 	n, sum, sq, memOwn float64
+	memSum, memSq      float64
 	recent             []unitLook
 	mem                float64
 	procs              int
@@ -504,6 +511,7 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 			mean := u.total / (age * 60)
 			u.n = math.Min(age, s.LearnRecentMinutes)
 			u.sum, u.sq, u.memOwn = u.n*mean, u.n*mean*mean, u.mem
+			u.memSum, u.memSq = u.n*u.mem, u.n*u.mem*u.mem
 		}
 	}
 
@@ -540,6 +548,7 @@ func (t *tracker) look(now time.Time, seconds float64, nodes []procNode, marks [
 			sp.Minutes, sp.Cores, sp.MemGB = u.seconds/60, u.cpu/u.seconds, u.memPeak
 			f := math.Pow(0.5, sp.Minutes/s.LearnRecentMinutes)
 			u.n, u.sum, u.sq = u.n*f+sp.Minutes, u.sum*f+sp.Minutes*sp.Cores, u.sq*f+sp.Minutes*sp.Cores*sp.Cores
+			u.memSum, u.memSq = u.memSum*f+sp.Minutes*sp.MemGB, u.memSq*f+sp.Minutes*sp.MemGB*sp.MemGB
 			u.memOwn = math.Max(u.memOwn*f, u.memPeak)
 			u.cpu, u.seconds, u.memPeak = 0, 0, 0
 		}
@@ -575,7 +584,16 @@ func (t *tracker) live(now time.Time, l learned, s Settings) []LiveWork {
 		lw.Expect = w*mean + (1-w)*prior.Cores
 		lw.Swing = round2(spread(lw.Expect, w*meanSq+(1-w)*(prior.Swing*prior.Swing+prior.Cores*prior.Cores)))
 		lw.Expect = round2(lw.Expect)
-		lw.ExpectMemGB = round2(math.Max(u.mem, w*u.memOwn+(1-w)*prior.MemGB))
+		// Memory the same way: what its own minutes held on average and how far they strayed,
+		// and the most it is expected to reach, which is never under what it holds now.
+		var mem, memSq float64
+		if u.n > 0 {
+			mem, memSq = u.memSum/u.n, u.memSq/u.n
+		}
+		expectMem := w*mem + (1-w)*prior.MemGB
+		lw.MemSwing = round2(spread(expectMem, w*memSq+(1-w)*(prior.MemSwing*prior.MemSwing+prior.MemGB*prior.MemGB)))
+		lw.MemMost = round2(math.Max(math.Max(u.mem, expectMem), w*u.memOwn+(1-w)*prior.MemMost))
+		lw.ExpectMemGB = round2(expectMem)
 		var cpu, secs float64
 		for _, k := range u.recent {
 			cpu, secs = cpu+k.cpu, secs+k.seconds
@@ -619,16 +637,53 @@ func liveFromMarks(marks []runMark) []LiveWork {
 }
 
 // openWork adds the open work up: what it uses over the short window, what it is expected to use,
-// its swing squared (the pieces swing apart from each other, so their squares add), and the
-// memory it is expected to reach beyond what it holds now.
-func openWork(work []LiveWork) (now, expect, swingSq, memOwed float64) {
+// its swing squared (the pieces swing apart from each other, so their squares add), and its
+// memory taken together.
+func openWork(work []LiveWork) (now, expect, swingSq float64, mem memLoad) {
 	for _, w := range work {
 		now += w.Now
 		expect += w.Expect
 		swingSq += w.Swing * w.Swing
-		memOwed += math.Max(0, w.ExpectMemGB-w.MemGB)
+		mem.add(w.MemGB, w.ExpectMemGB, w.MemSwing, math.Max(w.MemMost, w.MemGB), 1)
 	}
-	return now, expect, swingSq, memOwed
+	return now, expect, swingSq, mem
+}
+
+// memLoad is the memory of pieces of work taken together: what they hold now, what they are
+// expected to hold, their swing squared, how far the one that reaches furthest goes above what
+// it is expected to hold, and how far all of them would at once.
+type memLoad struct {
+	held, expect, swingSq, reach, reachSum float64
+}
+
+// add counts count pieces that begin together, each holding held now, expected to hold expect,
+// give or take swing, and to reach most. Pieces that begin together are one command started
+// several times and reach their most together, so they are counted as one piece that many times
+// the size; pieces added one by one swing apart from each other. A piece swings no further up
+// than it reaches: an estimate still pulled between two levels that disagree has a wide swing and
+// a most it was never seen above, and it is the most that was measured.
+func (m *memLoad) add(held, expect, swing, most float64, count int) {
+	k := float64(max(count, 1))
+	reach := k * math.Max(0, most-expect)
+	swing = math.Min(swing, math.Max(0, most-expect))
+	m.held += k * held
+	m.expect += k * expect
+	m.swingSq += k * k * swing * swing
+	m.reach = math.Max(m.reach, reach)
+	m.reachSum += reach
+}
+
+// kept is the memory kept free above what the pieces are expected to hold. Two things are certain
+// and one is not. Each piece reaches its most at some time, so the furthest any one of them
+// reaches is always kept. They never hold more than all of them at their most, so no more than
+// that is kept. Between the two, how many are high in the same minute is chance: margin times
+// their swing taken together, the squares adding as they do for processors.
+//
+// Why: until 2026-11-11 what was kept was every piece's own reach, added up: all of them at
+// their most in one minute, on top of what was in use. That is the top of the range, and it was
+// treated as the expectation.
+func (m memLoad) kept(margin float64) float64 {
+	return math.Max(m.reach, math.Min(margin*math.Sqrt(m.swingSq), m.reachSum))
 }
 
 func workWords(w LiveWork) string {

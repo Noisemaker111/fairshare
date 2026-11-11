@@ -20,7 +20,9 @@ home's meter is the one every launch asks.
 
 The line is checked end to end by `python -I scripts/queue-e2e.py fairshare.exe`: the built
 program in a private home, with real files, the real lock and a real notify command, on readings
-written by hand so "full" and "room" are certain whatever the PC is doing.
+written by hand so "full" and "room" are certain whatever the PC is doing. Its last part is
+memory: the PC of 2026-11-11 with 36 of 64 GB free takes a thread, and what would really run it
+out is refused.
 
 The pool is checked end to end by `python -I scripts/pool-e2e.py fairshare.exe` (or
 `fairshare-linux` on Linux): three machines in private homes, each reached through a command put
@@ -34,7 +36,8 @@ What is learned is checked end to end by `python -I scripts/learn-e2e.py fairsha
 run through the pool and, on Linux, a thread whose job detaches from it. Nothing in it is written
 by hand. Every number is held against what the burning processes themselves say they used, never
 against what an idle machine would give them, so it means the same on a full PC; there a run
-waits up to three minutes for room, and otherwise it takes about a minute.
+waits up to three minutes for room, and otherwise it takes about two minutes. One of its runs
+holds 300 MB for a tenth of its time, and is learned as its average, its swing and its most.
 `LEARN_E2E_BREAK=1` keeps the meter from starting, to see the checks fail.
 
 Every script takes the program by its whole path (`os.path.abspath`): a bare name is looked for
@@ -114,6 +117,10 @@ old counts; `fairshare install` puts it back.
   (`desktopFree` in `room.go`): nobody at the PC, one piece at a time. A lag is never answered by
   keeping more processors before `fairshare status` shows what the screen's frames take; on
   2026-11-11 the reserve was not the cause and 8 kept changed nothing.
+- Memory is never a sum of peaks. A piece of work is expected to hold its average; the most it
+  was seen holding is how far it reaches, and room for that is kept once for the open work
+  together (`memLoad.kept` in `work.go`), as processors keep room for the swing. A change that
+  makes the most count once per piece again is the bug of 2026-11-11 (36 of 64 GB free, refused).
 - What a process used is read, not guessed, for every process a look ever saw. The one estimate
   is `creditUnseen` (`work.go`); a change that adds a second one must say why it cannot be read.
 - Windows calls go through `syscall`, never `golang.org/x/sys/windows`, which imports `net`.

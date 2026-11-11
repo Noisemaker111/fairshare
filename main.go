@@ -409,6 +409,8 @@ func statusText(v Verdict, s Settings) string {
 			text += fmt.Sprintf(" give or take %.1f", v.Open.Swing)
 		}
 		row("open work", fmt.Sprintf("%s; counted as %.1f in use", text, v.CPU.Used))
+		row("its memory", fmt.Sprintf("holds %.1f GB, expected to hold %.1f, %.1f kept for when it holds more; with everything else %.1f of %.1f GB counted as taken",
+			v.Open.MemGB, v.Open.MemExpect, v.Open.MemKept, v.Mem.Used+v.Mem.Pending, v.Mem.Limit))
 	}
 	if v.CPU.Pending > 0 {
 		row("just let in", fmt.Sprintf("counted as %.1f processors until it is seen running", v.CPU.Pending))
@@ -435,13 +437,14 @@ func statusText(v Verdict, s Settings) string {
 		row("in the line", fmt.Sprintf("%d launches wait for room, the first for %.0f minutes (`fairshare queue`)", len(q), time.Since(q[0].QueuedAt).Minutes()))
 	}
 	if len(r.Work) > 0 {
-		fmt.Fprintf(&b, "\n  open work (processors now, expected, give or take; GB now, expected; its own minutes):\n")
+		fmt.Fprintf(&b, "\n  open work (processors now, expected, give or take; GB now, expected, give or take, at most; its own minutes):\n")
 		for i, w := range r.Work {
 			if i == 12 {
 				fmt.Fprintf(&b, "    and %d more\n", len(r.Work)-i)
 				break
 			}
-			fmt.Fprintf(&b, "    %-52.52s %5.1f %5.1f %5.1f  %5.1f %5.1f  %5.0f\n", workWords(w), w.Now, w.Expect, w.Swing, w.MemGB, w.ExpectMemGB, w.Minutes)
+			fmt.Fprintf(&b, "    %-52.52s %5.1f %5.1f %5.1f  %5.1f %5.1f %5.1f %5.1f  %5.0f\n", workWords(w), w.Now, w.Expect, w.Swing,
+				w.MemGB, w.ExpectMemGB, w.MemSwing, max(w.MemMost, w.MemGB, w.ExpectMemGB), w.Minutes)
 		}
 	}
 	if len(r.Programs) > 0 {
@@ -474,7 +477,8 @@ func cmdLearned(args []string) error {
 		return nil
 	}
 	fmt.Printf("What work was measured using here. Minutes fade by half every %.0f days; %.0f minutes weigh as much as everything wider.\n", s.LearnHalfLifeDays, s.LearnTrustMinutes)
-	fmt.Printf("\n  %-58s %6s %6s %6s %8s %6s %8s\n", "WORK", "PROC", "+/-", "GB", "MINUTES", "ENDED", "LASTS")
+	fmt.Println("GB is what a minute of it holds on average and MOST the most one minute held: room is kept for one piece to reach its most, never for all of them at once.")
+	fmt.Printf("\n  %-58s %6s %6s %6s %6s %6s %8s %6s %8s\n", "WORK", "PROC", "+/-", "GB", "+/-", "MOST", "MINUTES", "ENDED", "LASTS")
 	for _, n := range t {
 		name := map[string]string{"thread": "every thread", "run": "every run", "job": "every job outside a thread"}[n.Kind]
 		switch {
@@ -487,7 +491,7 @@ func cmdLearned(args []string) error {
 		if n.Seconds >= 1 && n.Kind == "run" {
 			took = lasts(n.Seconds)
 		}
-		fmt.Printf("  %-58.58s %6.1f %6.1f %6.1f %8.0f %6.0f %8s\n", name, n.Cores, n.Swing, n.MemGB, n.Minutes, n.Works, took)
+		fmt.Printf("  %-58.58s %6.1f %6.1f %6.1f %6.1f %6.1f %8.0f %6.0f %8s\n", name, n.Cores, n.Swing, n.MemGB, n.MemSwing, n.MemMost, n.Minutes, n.Works, took)
 	}
 	return nil
 }

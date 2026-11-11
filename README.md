@@ -59,8 +59,25 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
   and that expectation. And because open work does not all peak in the same minute, room is kept
   for its swing taken together (the spreads of the pieces add as squares), not for every piece's
   peak: a steady build needs its average, one bursty thread needs well over its average, ten
-  bursty threads need far less than ten peaks. Memory the open work is expected to reach and has
-  not taken yet is kept for it the same way.
+  bursty threads need far less than ten peaks.
+- **Judges memory the same way, not by adding up peaks.** A kind of work is learned as three
+  numbers: what a minute of it holds on average, how far its minutes stray from that, and the
+  most one minute held (`fairshare learned`: GB, +/-, MOST). An open piece is expected to hold
+  what its own minutes held, the recent ones most. What counts as taken is the memory in use,
+  plus whatever the open work is expected to hold beyond what it holds now, plus room kept once
+  for it to hold more. That room is the larger of two things: how far the one piece that reaches
+  furthest goes above what it is expected to hold (every piece reaches its most at some time, so
+  that is certain), and `learn_mem_margin` times the swing of the pieces taken together (how many
+  are high in the same minute is chance); and never more than every piece at its most at once.
+  A new piece adds what it is expected to hold and whatever more has to be kept once it is one
+  of them. Several pieces started together count as one piece that many times the size: they
+  are one command and reach their most together. Why: until 2026-11-11 every open thread
+  counted as the most it might reach, added up, and a new thread as the most any thread ever
+  held. Jon's PC refused launches with 36 of 64 GB free ("a new thread counts as 21.1 GB on top
+  of 36.5 GB that work let in or open here is still expected to take") while its seven threads
+  held 0.5 to 6 GB each. The same evening counts as 9.0 GB on top of 12.2 now, 49 of the 56 GB
+  that may be taken, and is let in; with 26 GB free it is still refused, because the next Owl
+  build would land in the memory that is kept free.
 - **Counts a launch only until it is seen running.** Work let in a moment ago counts at its
   estimate until the meter sees it (a new piece of its kind and repo), then as itself. A run
   counts for exactly as long as it runs. Work that never shows up stops counting after 5
@@ -278,6 +295,7 @@ read on every call. None of them is a count of threads.
 | `learn_half_life_days` | 3 | measured minutes count for half after this long |
 | `learn_recent_minutes` | 30 | the same for a running piece of work's own minutes: what it did lately says most about what it does next |
 | `learn_margin` | 1 | how much of the open work's swing, taken together, is kept free; 0 keeps none |
+| `learn_mem_margin` | 2 | the same for memory, and more: work short of processors runs slower, work short of memory is ended. 0 keeps only how far one piece reaches |
 | `reserve_min_processors` | 2 | the least kept for the user |
 | `reserve_max_share` | 0.5 | the most, as a share of the machine |
 | `reserve_headroom_full_screen` | 2 | room over what a running game's own processes used (`reserve_headroom` is no longer used) |
