@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,8 +73,15 @@ func TestANewArrivalPassesTheLineOnlyWithRoomForEveryoneInIt(t *testing.T) {
 		t.Fatalf("room for the line and the arrival was refused: %s", v.Reason)
 	}
 	line[0].Need.Cores = 5
-	if v := decide(pc(5, 5, 30, 60, "active"), s, Ask{}, lineNeed(line, false)); v.OK {
+	v := decideBehind(pc(5, 5, 30, 60, "active"), s, Ask{}, Need{Cores: 1}, lineNeed(line, false))
+	if v.OK {
 		t.Fatalf("an arrival took the room the line waits for: %s", v.Reason)
+	}
+	// The refusal says which part is the line and which is threads just let in.
+	for _, want := range []string{"last 5 minutes count as 1.0 more", "ahead of it in the line count as 9.0 more"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Fatalf("reason lacks %q: %s", want, v.Reason)
+		}
 	}
 }
 

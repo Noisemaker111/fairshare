@@ -57,6 +57,8 @@ type Verdict struct {
 	CPU     Limit   `json:"cpu"`
 	Mem     Limit   `json:"mem"`
 	Disk    Limit   `json:"disk"`
+	// Line is the part of each Pending that is launches waiting in the line ahead of this one.
+	Line    Need    `json:"line"`
 	Reading Reading `json:"reading"`
 }
 
@@ -114,12 +116,19 @@ func estimate(r Reading, s Settings, a Ask) Need {
 
 // decide answers for one machine. pending is what threads let in during the settle time count as.
 func decide(r Reading, s Settings, a Ask, pending Need) Verdict {
+	return decideBehind(r, s, a, pending, Need{})
+}
+
+// decideBehind answers for a launch that arrives behind a line: granted is what threads let in
+// during the settle time count as, line what the launches waiting ahead of it do.
+func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
+	pending := granted.plus(line)
 	if a.Count < 1 {
 		a.Count = 1
 	}
 	need := estimate(r, s, a).times(a.Count)
 	target := cpuTarget(r, s)
-	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r}
+	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r, Line: line}
 
 	demand := math.Max(r.DemandShort, r.DemandLong)
 	v.CPU = Limit{Used: demand, Pending: pending.Cores, Need: need.Cores, Limit: r.Capacity * target, Unit: "processors"}
@@ -155,8 +164,11 @@ func reason(v Verdict, s Settings, a Ask) string {
 	if !v.CPU.OK {
 		fmt.Fprintf(&b, " Work wants %.1f of the %.0f processors agent work may use (%.1f in use and %.1f waiting for one, over the last %s)",
 			v.CPU.Used, r.Capacity, busyOf(r), waitingOf(r), span(windowOf(r)))
-		if v.CPU.Pending > 0 {
-			fmt.Fprintf(&b, ", threads let in during the last %.0f minutes count as %.1f more", s.SettleMinutes, v.CPU.Pending)
+		if let := v.CPU.Pending - v.Line.Cores; let > 0.05 {
+			fmt.Fprintf(&b, ", threads let in during the last %.0f minutes count as %.1f more", s.SettleMinutes, let)
+		}
+		if v.Line.Cores > 0 {
+			fmt.Fprintf(&b, ", the launches ahead of it in the line count as %.1f more", v.Line.Cores)
 		}
 		fmt.Fprintf(&b, ", and %s counts as %.1f; the limit is %.1f (%.0f%%%s).", what, v.CPU.Need, v.CPU.Limit, v.Target*100, presenceWords(r.Presence))
 		if top := programWords(r.Programs, 4); top != "" {

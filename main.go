@@ -214,7 +214,7 @@ func cmdRoom(args []string) int {
 			return nil
 		}
 		// A new arrival passes the line only when there is room for everyone in it too.
-		v = decide(r, s, ask, pendingNeed(now, settle).plus(lineNeed(q, false)))
+		v = decideBehind(r, s, ask, pendingNeed(now, settle), lineNeed(q, false))
 		if *key != "" && held != nil {
 			v.OK = false
 			v.Reason = fmt.Sprintf("%s: this launch is already in the line, place %d of %d, waiting %.0f minutes. It is not lost: fairshare tells %s the moment there is room, and it goes in then. Do not send it again before that.",
@@ -226,9 +226,6 @@ func cmdRoom(args []string) int {
 				took = takeGrant(now, settle, Need{v.CPU.Need, v.Mem.Need, v.Disk.Need}, *label) == nil
 			}
 			return nil
-		}
-		if len(q) > 0 {
-			v.Reason += fmt.Sprintf(" %d launches already wait in the line and are counted first.", len(q))
 		}
 		if !*wait || *key == "" || *launcher == "" {
 			return nil
