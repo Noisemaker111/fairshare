@@ -517,6 +517,8 @@ func (m *meter) look(s Settings, now time.Time) (Reading, bool, error) {
 		return r, true, nil
 	}
 	r.Reserved, r.Capacity, r.ReserveWhy = want, float64(len(idle)-want), why
+	// Looks from before the reserve changed were split at the old number.
+	r.UserBusy = min(r.UserBusy, float64(want))
 	return r, true, nil
 }
 
