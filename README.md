@@ -162,6 +162,7 @@ The pool is `pool.json` in the home of the machine that places work. A member:
 | `via` | the words that run a command on it, put in front of the command; none for this machine |
 | `fairshare` | the fairshare program there; unset, `fairshare` on its PATH |
 | `wake` | run on this machine when it does not answer; without it a silent machine is skipped |
+| `awake`, `awake_match` | run on this machine before anything is sent: up when it exits 0 and prints what the pattern finds. For a carrier that wakes a sleeping machine just by being used |
 | `hours`, `keep_hours` | prints its plan-hours left (a number or `{"left": n}`); it is woken only above `keep_hours` |
 | `can` | what it can do beyond its OS, for `--needs` |
 | `work`, `repos` | the folder that holds its repos, and folders for repos kept somewhere else |

@@ -221,6 +221,32 @@ check("when a machine cannot tell and the rest are full, the pool cannot tell ei
 reading("host-a", 0.5)
 code, pl, raw = placed()
 check("and when another has room the work goes there", code == 0 and pl.get("machine") == "host-a", raw)
+# A carrier that wakes a machine just by being used: the member's own check is asked first.
+open(os.path.join(home["host-b"], "state"), "w").write("boat-host: host-b stopped")
+state = os.path.join(root, "state.py")
+open(state, "w").write("import os, sys\nprint(open(os.path.join(sys.argv[1], 'state')).read())\n")
+os.path.exists(os.path.join(home["host-b"], "asleep")) and os.remove(os.path.join(home["host-b"], "asleep"))
+pool = json.load(open(os.path.join(home["pc"], "pool.json")))
+for m in pool["members"]:
+    if m["name"] == "host-b":
+        m["awake"], m["awake_match"] = [py, "-I", state, home["host-b"]], r" (ready|idle|running)\b"
+        m["via"] = [py, "-I", os.path.join(root, "via-counted.py"), home["host-b"]]
+json.dump(pool, open(os.path.join(home["pc"], "pool.json"), "w"))
+open(os.path.join(root, "via-counted.py"), "w").write(
+    "import os, subprocess, sys\n"
+    "open(os.path.join(sys.argv[1], 'reached'), 'a').write('reached\\n')\n"
+    "sys.exit(subprocess.run([sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'via.py')] + sys.argv[1:]).returncode)\n")
+open(os.path.join(home["host-b"], "hours"), "w").write("3")
+reading("host-a", 7.9)
+code, pl, raw = placed()
+states = {m["name"]: m["state"] for m in pl.get("machines", [])}
+check("a machine its own check calls stopped is asleep, and nothing is sent through its carrier", states.get("host-b") == "asleep"
+      and not lines(os.path.join(home["host-b"], "reached")), raw)
+open(os.path.join(home["host-b"], "state"), "w").write("boat-host: host-b ready t3-env=1")
+code, pl, raw = placed()
+check("once its check calls it ready it is asked like any machine", code == 0 and pl.get("machine") == "host-b"
+      and len(lines(os.path.join(home["host-b"], "reached"))) == 1, raw)
+reading("host-a", 0.5)
 code, out, err = fs("pool", "leave", "host-b")
 check("a machine leaves with one command", code == 0 and "2 machines remain" in out, out + err)
 

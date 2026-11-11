@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -51,6 +52,11 @@ type member struct {
 	Fairshare string `json:"fairshare,omitempty"`
 	// Wake is run here when the machine does not answer; without it a silent machine is skipped.
 	Wake []string `json:"wake,omitempty"`
+	// Awake is run here before anything is sent: the machine is up when it exits 0 and, with
+	// AwakeMatch, prints something that pattern finds. For a carrier that would wake a sleeping
+	// machine just by being used, which would spend plan-hours on every question.
+	Awake      []string `json:"awake,omitempty"`
+	AwakeMatch string   `json:"awake_match,omitempty"`
 	// Hours is run here before a wake and prints the plan-hours left (a number, or {"left": n}).
 	// The machine is woken only while more than KeepHours are left.
 	Hours     []string `json:"hours,omitempty"`
@@ -431,8 +437,33 @@ func tail(text string, n int) string {
 	return text
 }
 
-// send carries an errand to a member and returns what it printed.
+// up says whether the member's own check calls it awake; a member with no check is asked directly.
+func up(p poolFile, m member) (bool, string) {
+	if len(m.Awake) == 0 {
+		return true, ""
+	}
+	out, err := command(m.Awake, nil, p.askTime())
+	if err != nil {
+		return false, "its awake check says no: " + tail(err.Error(), 160)
+	}
+	if m.AwakeMatch != "" {
+		found, err := regexp.Match(m.AwakeMatch, out)
+		if err != nil {
+			return false, "awake_match is not a pattern: " + err.Error()
+		}
+		if !found {
+			return false, "its awake check printed: " + tail(string(out), 160)
+		}
+	}
+	return true, ""
+}
+
+// send carries an errand to a member and returns what it printed. A member its own check calls
+// asleep is sent nothing.
 func send(p poolFile, m member, e errand) ([]byte, []byte, error) {
+	if ok, why := up(p, m); !ok {
+		return nil, []byte(why), errors.New(why)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.askTime())
 	defer cancel()
 	cmd := m.command(ctx, e)
@@ -793,6 +824,7 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
   fairshare pool join                this machine joins (--name, --can gpu,deploy, --work <folder of repos>)
   fairshare pool join --name N --via "<words that run a command on N>"
                                      another machine joins: --fairshare <program there> --wake "<cmd>"
+                                     --awake "<cmd that says it is up>" --awake-match <pattern>
                                      --hours "<cmd printing plan-hours left>" --keep-hours N
                                      --work <folder> --repos name=folder,... --busy-dir <folder> --extra k=v,...
   fairshare pool join --mesh         every device of the mesh (Hona/mesh) joins, and the pool follows the mesh
@@ -901,6 +933,8 @@ func poolJoin(args []string) error {
 	via := fs.String("via", "", "the words that run a command on it; none: this machine")
 	prog := fs.String("fairshare", "", "the fairshare program there")
 	wake := fs.String("wake", "", "the command that wakes it")
+	awake := fs.String("awake", "", "the command that says whether it is up, run before anything is sent to it")
+	awakeMatch := fs.String("awake-match", "", "a pattern that command's output must hold")
 	hours := fs.String("hours", "", "the command that prints its plan-hours left")
 	keep := fs.Float64("keep-hours", 0, "plan-hours that are never spent on a wake")
 	can := fs.String("can", "", "what it can do beyond its OS: gpu,deploy")
@@ -939,11 +973,11 @@ func poolJoin(args []string) error {
 		}
 		return nil
 	}
-	m := member{Name: *name, Fairshare: *prog, KeepHours: *keep, Can: list(*can), Work: *workDir, Repos: pairs(*repos), BusyDir: *busy, Extra: pairs(*extra)}
+	m := member{Name: *name, Fairshare: *prog, AwakeMatch: *awakeMatch, KeepHours: *keep, Can: list(*can), Work: *workDir, Repos: pairs(*repos), BusyDir: *busy, Extra: pairs(*extra)}
 	for _, c := range []struct {
 		text string
 		into *[]string
-	}{{*via, &m.Via}, {*wake, &m.Wake}, {*hours, &m.Hours}} {
+	}{{*via, &m.Via}, {*wake, &m.Wake}, {*awake, &m.Awake}, {*hours, &m.Hours}} {
 		if *c.into, err = argvOf(c.text); err != nil {
 			return err
 		}
