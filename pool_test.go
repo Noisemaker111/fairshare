@@ -83,20 +83,96 @@ func TestPlanHoursDecideAWake(t *testing.T) {
 		{"even when the number would have been fine", 99, false, 10, false, "could not be read"},
 	}
 	for _, c := range cases {
-		got, why := mayWake(c.left, c.known, c.keep)
+		got, why := mayWake(planHours{Left: c.left, Keep: c.keep, Known: c.known})
 		if got != c.want || !strings.Contains(why, c.wantInWords) {
 			t.Errorf("%s: %v %q", c.name, got, why)
 		}
 	}
 	for text, want := range map[string]float64{"41.5\n": 41.5, ` {"left": 12} `: 12, "boat: note\n{\"left\": 0}": 0} {
-		if got, ok := readHours([]byte(text)); !ok || got != want {
-			t.Errorf("hours %q read as %v %v", text, got, ok)
+		if got := readHours([]byte(text)); !got.Known || got.Left != want || got.Keep != 0 {
+			t.Errorf("hours %q read as %+v", text, got)
 		}
 	}
 	for _, text := range []string{"", "plenty", `{"used": 3}`, `{"left": "many"}`} {
-		if _, ok := readHours([]byte(text)); ok {
+		if got := readHours([]byte(text)); got.Known {
 			t.Errorf("hours %q were read as a number", text)
 		}
+	}
+	// How many are kept can be the command's to say: a plan that has to last to its reset keeps
+	// more on a day that used much, and says why. 310 left is plenty, and still no wake.
+	h := readHours([]byte(`{"left": 309.9, "keep": 309.9, "why": "83 used in the last 24 hours, and 12 a day lasts to the reset"}`))
+	if ok, why := mayWake(h); ok || !strings.Contains(why, "309.9 plan-hours are left and 309.9 are kept (83 used in the last 24 hours, and 12 a day lasts to the reset), so it stays asleep") {
+		t.Errorf("a plan over its daily rate: %v %q", ok, why)
+	}
+	if ok, _ := mayWake(readHours([]byte(`{"left": 309.9, "keep": 2, "why": "5 used in the last 24 hours"}`))); !ok {
+		t.Errorf("a plan under its daily rate was not woken")
+	}
+}
+
+// "That machine" is said by what its extra holds, never by its name; and a machine launches
+// already wait in the line for is shut to the launch that arrives now.
+func TestWorkAsksForAMachineByWhatItHoldsNotItsName(t *testing.T) {
+	pcEnv, hostEnv := "3be418ad", "a1488a4f"
+	pc := member{Name: "jons-pc", OS: "windows", Extra: map[string]string{"env": pcEnv}}
+	host := member{Name: "t3-host", OS: "linux", Via: []string{"boat"}, Extra: map[string]string{"env": hostEnv, "project.appforgutters": "mcp:049a"}}
+	bare := member{Name: "blade", OS: "linux", Via: []string{"mesh", "exec", "blade"}}
+	cases := []struct {
+		name string
+		m    member
+		w    work
+		want bool
+	}{
+		{"the machine whose extra holds it", host, work{Where: map[string]string{"env": hostEnv}}, true},
+		{"another machine", pc, work{Where: map[string]string{"env": hostEnv}}, false},
+		{"a machine that holds nothing", bare, work{Where: map[string]string{"env": hostEnv}}, false},
+		{"work that asks for none goes anywhere", bare, work{}, true},
+		{"this machine is `pc` in the line whatever it is called in the pool", pc, work{Shut: []string{"pc"}}, false},
+		{"and is not shut by its pool name", pc, work{Shut: []string{"jons-pc"}}, true},
+		{"a host is its own name in the line", host, work{Shut: []string{"t3-host"}}, false},
+	}
+	for _, c := range cases {
+		if got, why := open(c.m, c.w); got != c.want {
+			t.Errorf("%s: %v (%s)", c.name, got, why)
+		}
+	}
+	p := poolFile{Members: []member{pc, host, bare}}
+	if m, ok := p.byLine("pc"); !ok || m.Name != "jons-pc" {
+		t.Errorf("the line's pc is %+v", m)
+	}
+	if m, ok := p.byLine("t3-host"); !ok || m.Name != "t3-host" {
+		t.Errorf("the line's t3-host is %+v", m)
+	}
+	if _, ok := p.byLine("gone"); ok {
+		t.Errorf("a machine that left the pool was found")
+	}
+}
+
+// A launch that found no room waits for the machines open to it: not one that said itself it
+// cannot run it, not one that never answers, and still one it could not be asked about because
+// launches already wait for it.
+func TestALaunchWaitsForTheMachinesOpenToIt(t *testing.T) {
+	p := poolFile{Members: []member{
+		{Name: "jons-pc", OS: "windows"},
+		{Name: "full", OS: "linux", Via: []string{"x"}},
+		{Name: "no-folder", OS: "linux", Via: []string{"x"}},
+		{Name: "asleep", OS: "linux", Via: []string{"x"}, Wake: []string{"wake"}},
+		{Name: "silent", OS: "linux", Via: []string{"x"}},
+		{Name: "waited-for", OS: "linux", Via: []string{"x"}},
+	}}
+	answers := []reply{{State: "full"}, {State: "full"}, {State: "closed"}, {State: "asleep"}, {State: "unreachable"}, {State: "closed"}}
+	w := work{Shut: []string{"waited-for"}}
+	if got := lineMachines(p, w, answers); !slices.Equal(got, []string{"pc", "full", "asleep", "waited-for"}) {
+		t.Errorf("it waits for %v", got)
+	}
+	// Work that needs Windows waits for the PC alone.
+	w.Needs = []string{"windows"}
+	if got := lineMachines(p, w, answers); !slices.Equal(got, []string{"pc"}) {
+		t.Errorf("Windows work waits for %v", got)
+	}
+	// And the machines launches still wait for are the ones not yet offered.
+	q := []queued{{Machines: []string{"pc", "full"}}, {State: "offered", Machine: "asleep", Machines: []string{"asleep"}}, {}}
+	if got := waitedFor(q); !slices.Equal(got, []string{"pc", "full"}) {
+		t.Errorf("launches wait for %v", got)
 	}
 }
 
