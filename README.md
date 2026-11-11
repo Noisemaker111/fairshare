@@ -53,7 +53,12 @@ on calmer nights the same cap refused an eighth thread on an idle PC.
 - **Says why.** A refusal names the numbers: processors in use, threads waiting, the limit and
   what set it, and the busiest programs. Every answer goes to `decisions.jsonl`.
 
-It never runs per command and never touches another process. The first fairshare put a hook in
+It never runs per command and never touches another process. Which processors agent work runs
+on is Owl's alone to set: its keeper holds every agent process on exactly the processors from
+the reserve up, wider as well as narrower (owl-go #1138, 2026-11-11). Before that it only
+narrowed, so once the reserve followed the user, agent sessions alive while a game ran stayed
+on 12 of 24 processors; for a few hours the meter widened them itself, and that code is gone.
+If agent work is again short of processors beside idle ones, look there first. The first fairshare put a hook in
 front of every agent command and every process in a Windows job; that cost 130 to 160 ms a call
 and broke commands, and it was removed on 2026-11-08. That code is the tag `v1-final`.
 
