@@ -60,6 +60,15 @@ type Reading struct {
 	DemandLong   float64 `json:"demand_long"`
 	// UserBusy is processors in use on the reserved processors.
 	UserBusy float64 `json:"user_busy"`
+	// FirmShort and FirmLong are the processors in use on the agent processors that would not
+	// step aside for an urgent launch (firmCores): an urgent launch is judged by these. A machine
+	// where nothing steps aside (Linux, no Owl) has them equal to Demand.
+	FirmShort float64 `json:"firm_short"`
+	FirmLong  float64 `json:"firm_long"`
+	// IdleCores is the agent work Owl holds at idle priority now, over the short window.
+	IdleCores float64 `json:"idle_cores"`
+	// Urgent is the urgent hold in force, if any.
+	Urgent *urgentHold `json:"urgent,omitempty"`
 
 	MemTotalGB float64 `json:"mem_total_gb"`
 	// MemAvailGB is the least that was free during the short window.
@@ -87,6 +96,8 @@ type sample struct {
 	busy       float64 // processors in use on the agent processors over that time
 	userBusy   float64 // and on the reserved ones
 	waiting    float64 // threads ready for a processor at the instant of the look
+	firm       float64 // processors in use that would not step aside for an urgent launch
+	idleCores  float64 // agent work at idle priority
 	memAvailGB float64
 	workCores  float64
 	programs   map[string]float64 // CPU-seconds by program, low-priority work only
@@ -142,7 +153,11 @@ func (w *window) seed(lines []historyLineRead, now time.Time, long time.Duration
 			continue
 		}
 		// A history line is the mean of the minute before it.
-		w.samples = append(w.samples, sample{at: l.At, seconds: 60, busy: l.Busy, waiting: l.Waiting, userBusy: l.UserBusy, memAvailGB: l.MemAvailGB})
+		firm := l.Busy // a line from before firm was kept: count none of it as stepping aside
+		if l.Firm != nil {
+			firm = *l.Firm
+		}
+		w.samples = append(w.samples, sample{at: l.At, seconds: 60, busy: l.Busy, waiting: l.Waiting, userBusy: l.UserBusy, memAvailGB: l.MemAvailGB, firm: firm})
 	}
 }
 
@@ -172,6 +187,24 @@ func (w *window) means(now time.Time, d time.Duration) (busy, waiting, userBusy,
 		return 0, 0, 0, 0, 0, programs, others, 0
 	}
 	return busy / seconds, waiting / seconds, userBusy / seconds, workCores / seconds, minMem, programs, others, seconds
+}
+
+// firmMeans averages firm and idle cores over the looks no older than d, like means.
+func (w *window) firmMeans(now time.Time, d time.Duration) (firm, idle float64) {
+	var seconds float64
+	cut := now.Add(-d)
+	for _, s := range w.samples {
+		if !s.at.After(cut) || s.seconds <= 0 {
+			continue
+		}
+		seconds += s.seconds
+		firm += s.firm * s.seconds
+		idle += s.idleCores * s.seconds
+	}
+	if seconds == 0 {
+		return 0, 0
+	}
+	return firm / seconds, idle / seconds
 }
 
 // topPrograms turns CPU-seconds by program into the busiest few, in processors.

@@ -18,6 +18,7 @@ type historyLineRead struct {
 	At         time.Time `json:"at"`
 	Capacity   float64   `json:"capacity"`
 	Busy       float64   `json:"busy"`
+	Firm       *float64  `json:"firm,omitempty"`
 	Waiting    float64   `json:"waiting"`
 	UserBusy   float64   `json:"user_busy"`
 	Reserved   int       `json:"reserved"`

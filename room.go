@@ -58,8 +58,12 @@ type Verdict struct {
 	Mem     Limit   `json:"mem"`
 	Disk    Limit   `json:"disk"`
 	// Line is the part of each Pending that is launches waiting in the line ahead of this one.
-	Line    Need    `json:"line"`
-	Reading Reading `json:"reading"`
+	Line Need `json:"line"`
+	// Urgent says the launch was judged as urgent: against the work that would not step aside.
+	Urgent bool `json:"urgent,omitempty"`
+	// Repo is the repo's measured need when the estimate came from it.
+	Repo    *repoNeed `json:"repo,omitempty"`
+	Reading Reading   `json:"reading"`
 }
 
 // Ask is what the caller wants room for.
@@ -73,6 +77,11 @@ type Ask struct {
 	Explicit Need
 	// Disk says the work makes a checkout, so the disk is checked too.
 	Disk bool
+	// Repo, when set, is what a session of the launch's repo was measured using; it replaces the
+	// machine's average per open thread.
+	Repo *repoNeed
+	// Urgent judges the launch against the work that would not step aside for it.
+	Urgent bool
 }
 
 func cpuTarget(r Reading, s Settings) float64 {
@@ -88,7 +97,12 @@ func cpuTarget(r Reading, s Settings) float64 {
 // estimate is what one new thread is counted as on this machine.
 func estimate(r Reading, s Settings, a Ask) Need {
 	n := Need{Cores: s.ThreadCores, MemGB: s.ThreadMemGB}
-	if a.Threads > 0 {
+	if a.Repo != nil {
+		// What this repo's own sessions were measured using: an Owl thread compiling Rust and
+		// an AppForGutters thread waiting on its model are not the same thread.
+		n.Cores = max(n.Cores, min(a.Repo.Cores, r.Capacity))
+		n.MemGB = max(n.MemGB, min(a.Repo.MemGB, r.MemTotalGB/4))
+	} else if a.Threads > 0 {
 		// The machine's own average per open thread, capped so one heavy hour cannot make every
 		// later thread look as heavy as a quarter of the machine.
 		demand := math.Max(r.DemandShort, r.DemandLong)
@@ -128,9 +142,12 @@ func decideBehind(r Reading, s Settings, a Ask, granted, line Need) Verdict {
 	}
 	need := estimate(r, s, a).times(a.Count)
 	target := cpuTarget(r, s)
-	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r, Line: line}
+	v := Verdict{Machine: r.Machine, Target: target, Threads: a.Threads, Count: a.Count, Reading: r, Line: line, Urgent: a.Urgent, Repo: a.Repo}
 
 	demand := math.Max(r.DemandShort, r.DemandLong)
+	if a.Urgent {
+		demand = math.Max(r.FirmShort, r.FirmLong)
+	}
 	v.CPU = Limit{Used: demand, Pending: pending.Cores, Need: need.Cores, Limit: r.Capacity * target, Unit: "processors"}
 	v.CPU.OK = demand+pending.Cores+need.Cores <= v.CPU.Limit+1e-9
 
@@ -154,15 +171,32 @@ func reason(v Verdict, s Settings, a Ask) string {
 	if v.Count > 1 {
 		what = fmt.Sprintf("%d new threads", v.Count)
 	}
+	if v.Urgent {
+		what = "an urgent " + strings.TrimPrefix(what, "a ")
+	}
 	var b strings.Builder
+	counted := fmt.Sprintf("it counts as %.1f processors, the machine's average per open thread", v.CPU.Need)
+	if v.Repo != nil {
+		counted = fmt.Sprintf("it counts as %.1f processors: %s", v.CPU.Need, repoWords(*v.Repo))
+	}
 	if v.OK {
-		fmt.Fprintf(&b, "%s has room for %s: work is using %.1f of the %.0f processors it may use (limit %.1f), %.1f GB of memory is free and %.0f GB of disk.",
-			r.Machine, what, v.CPU.Used+v.CPU.Pending, r.Capacity, v.CPU.Limit, r.MemAvailGB, r.DiskFreeGB)
+		if v.Urgent {
+			held := math.Max(r.DemandShort, r.DemandLong) - v.CPU.Used
+			fmt.Fprintf(&b, "%s has room for %s: work that does not step aside uses %.1f of the %.0f processors agent work may use (limit %.1f), and %s. The other agent work (%.1f processors) is held at idle priority while it runs; nothing is stopped, and the processors kept for you stay yours.",
+				r.Machine, what, v.CPU.Used+v.CPU.Pending, r.Capacity, v.CPU.Limit, counted, max(0, held))
+			return b.String()
+		}
+		fmt.Fprintf(&b, "%s has room for %s: work is using %.1f of the %.0f processors it may use (limit %.1f), %.1f GB of memory is free and %.0f GB of disk; %s.",
+			r.Machine, what, v.CPU.Used+v.CPU.Pending, r.Capacity, v.CPU.Limit, r.MemAvailGB, r.DiskFreeGB, counted)
 		return b.String()
 	}
 	fmt.Fprintf(&b, "%s has no room for %s.", r.Machine, what)
 	if !v.CPU.OK {
-		fmt.Fprintf(&b, " Work is using %.1f of the %.0f processors agent work may use, over the last %s", v.CPU.Used, r.Capacity, span(windowOf(r)))
+		if v.Urgent {
+			fmt.Fprintf(&b, " Even with other agent work held back, work that does not step aside uses %.1f of the %.0f processors agent work may use", v.CPU.Used, r.Capacity)
+		} else {
+			fmt.Fprintf(&b, " Work is using %.1f of the %.0f processors agent work may use, over the last %s", v.CPU.Used, r.Capacity, span(windowOf(r)))
+		}
 		if w := waitingOf(r); w >= 1 {
 			fmt.Fprintf(&b, " (and %.0f more threads waited for one while they were full)", w)
 		}
@@ -173,6 +207,9 @@ func reason(v Verdict, s Settings, a Ask) string {
 			fmt.Fprintf(&b, ", the launches ahead of it in the line count as %.1f more", v.Line.Cores)
 		}
 		fmt.Fprintf(&b, ", and %s counts as %.1f; the limit is %.1f (%.0f%%%s).", what, v.CPU.Need, v.CPU.Limit, v.Target*100, presenceWords(r.Presence))
+		if v.Repo != nil {
+			fmt.Fprintf(&b, " %s.", repoWords(*v.Repo))
+		}
 		if top := programWords(r.Programs, 4); top != "" {
 			fmt.Fprintf(&b, " Busiest: %s.", top)
 		}

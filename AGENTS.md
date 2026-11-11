@@ -44,12 +44,16 @@ old counts; `fairshare install` puts it back.
   `~/.agents-pc/fairshare`.
 - Owl applies the reserve: the meter runs `owl agents set reserve_processors <n> --for 3m
   --real-home` with `OWL_CALLER=fairshare`.
+- Owl holds older sessions back for an urgent launch: `owl agents set yield_before <unix seconds>
+  --for 3m --real-home` from `room` when it lets one in and from the meter every minute while the
+  hold stands (`urgent.go`), `owl agents unset yield_before` when it ends. The hook passes `--repo`
+  (the project's folder name) so a launch counts as its repo's measured sessions (`repos.go`).
 
 ## Rules
 
 - Nothing runs per agent command. The first version's per-command hook cost 130 to 160 ms a call
   and broke commands; a launch is the only moment fairshare is asked.
-- fairshare reads and decides. It never sets a priority, puts a process in a job, suspends or
+- fairshare reads and decides. It never sets a priority (an urgent hold is Owl's keeper's, told), puts a process in a job, suspends or
   ends anything. Owl's keeper does the holding; fairshare only tells it the reserve.
 - fairshare never starts a thread. The line holds a launch's place and its room; the thread that
   asked sends the identical launch again, so every launch still passes every launch hook.

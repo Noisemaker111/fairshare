@@ -176,6 +176,8 @@ func linuxReading(f linuxFiles, processors int) (Reading, error) {
 	r.WaitingLong = waitingWhenFull(math.Max(0, five-r.Capacity), r.BusyLong, r.Capacity)
 	r.DemandShort, r.DemandLong = r.BusyShort, r.BusyLong
 	r.BusyShort, r.BusyLong, r.DemandShort, r.DemandLong = round2(r.BusyShort), round2(r.BusyLong), round2(r.DemandShort), round2(r.DemandLong)
+	// Nothing on Linux holds agent work back, so nothing steps aside for an urgent launch.
+	r.FirmShort, r.FirmLong = r.DemandShort, r.DemandLong
 	r.WorkCores = r.BusyShort
 	total, avail, err := parseMeminfo(f.Meminfo)
 	if err != nil {

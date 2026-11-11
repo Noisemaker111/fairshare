@@ -16,68 +16,73 @@ func formatMem(totalGB, availGB float64) string {
 }
 
 // The reserve on a 24-processor PC with two logical processors a core, one look every 5 s.
-func TestTheReserveFollowsWhatTheUsersProgramsUse(t *testing.T) {
+func TestTheReserveIsTwoUnlessAGameRuns(t *testing.T) {
 	s := defaultSettings()
 	var rv reserver
 	now := time.Date(2026, 11, 10, 21, 0, 0, 0, time.UTC)
-	step := func(cores, waiting float64, p Presence) (int, string) {
+	step := func(game string, cores, waiting float64, p Presence) (int, string) {
 		now = now.Add(5 * time.Second)
-		return rv.want(now, cores, waiting, p, s, 24, 2)
+		return rv.want(now, game, cores, waiting, p, s, 24, 2)
 	}
 	desk, away := Presence{State: "active"}, Presence{State: "away", IdleMinutes: 12}
-	game := Presence{State: "full-screen", App: "7daystodie.exe"}
+	full := Presence{State: "full-screen", App: "7DaysToDie.exe"}
 
-	// A light desk: a browser and a chat window, 0.8 processors. Not eight.
+	// 2026-11-11: nobody at the PC, Windows' own work (dwm, Defender, the indexer) at 3.7
+	// processors. It is not Jon: 2 kept, not 6.
 	var n int
+	var why string
 	for range 12 {
-		n, _ = step(0.8, 0, desk)
+		n, why = step("", 0, 0, away)
+	}
+	if n != 2 || !strings.Contains(why, "no game running") {
+		t.Fatalf("no game, away: keeps %d (%s), want 2", n, why)
+	}
+	// At the desk, busy browser and all, still 2: the reserve matters only for games.
+	for range 6 {
+		n, _ = step("", 0, 3, desk)
 	}
 	if n != 2 {
-		t.Fatalf("light desk keeps %d, want 2", n)
+		t.Fatalf("no game at the desk keeps %d, want 2", n)
 	}
-	// One burst to 3 processors raises it on that look, and it stays up for the window.
-	if n, _ = step(3, 0, desk); n != 6 {
-		t.Fatalf("after a burst to 3 it keeps %d, want 6 (3 x 1.5 = 4.5, in whole cores)", n)
+	// A browser playing a video full screen is not a game.
+	if n, why = step("", 0, 0, Presence{State: "full-screen", App: "chrome.exe"}); n != 2 || !strings.Contains(why, "not a game") {
+		t.Fatalf("a full-screen browser keeps %d (%s), want 2", n, why)
 	}
-	if n, _ = step(0.5, 0, desk); n != 6 {
-		t.Fatalf("one quiet look later it keeps %d, want still 6", n)
-	}
-	// Their programs waiting for a processor adds a core.
-	step(3, 2, desk)
-	if n, why := step(3, 2, desk); n != 8 || !strings.Contains(why, "waiting for a processor") {
-		t.Fatalf("with their threads waiting it keeps %d (%s), want 8", n, why)
-	}
-	// A game takes the foreground and uses 5: ten processors, more than the old fixed eight.
+	// A game full screen using 5: game-sized, 10.
 	for range 6 {
-		n, _ = step(5, 0, game)
+		n, _ = step("", 5, 0, full)
 	}
 	if n != 10 {
 		t.Fatalf("a game using 5 keeps %d, want 10", n)
 	}
-	// Away: once the window has gone quiet, nearly the whole PC is the agents'.
-	for range 40 {
-		n, _ = step(0.1, 0, away)
+	// Its threads waiting for a processor add a core.
+	step("", 5, 2, full)
+	if n, why = step("", 5, 2, full); n != 12 || !strings.Contains(why, "waiting for a processor") {
+		t.Fatalf("with its threads waiting it keeps %d (%s), want 12", n, why)
 	}
-	if n != 2 {
-		t.Fatalf("away keeps %d, want the least, 2", n)
+	// Game closed: back to 2 at once.
+	if n, _ = step("", 0, 0, desk); n != 2 {
+		t.Fatalf("after the game it keeps %d, want 2", n)
 	}
-	// The first key press puts back what the desk needed, before any load shows.
-	if n, _ = step(0.2, 0, desk); n < 6 {
-		t.Fatalf("back at the desk it keeps %d, want what the desk needed before", n)
+	// The game running again, alt-tabbed (not full screen): it is known, so game-sized from its
+	// first look, at what it needed last time.
+	if !rv.isGame("7daystodie.exe", s) || rv.isGame("chrome.exe", s) {
+		t.Fatal("the game was not learned, or the browser was")
 	}
-	// The game starts again: what it needed last time, on its first look.
-	for range 40 {
-		step(0.3, 0, desk)
-	}
-	if n, why := step(0.4, 0, game); n != 10 || !strings.Contains(why, "7daystodie.exe") {
+	if n, why = step("7daystodie.exe", 0.4, 0, desk); n != 10 || !strings.Contains(why, "7daystodie.exe") {
 		t.Fatalf("the game's first look keeps %d (%s), want the 10 it needed last time", n, why)
 	}
-	// Never more than half the machine, however hungry the foreground.
+	// Never more than half the machine, however hungry the game.
 	for range 3 {
-		n, _ = step(30, 0, game)
+		n, _ = step("7daystodie.exe", 30, 0, desk)
 	}
 	if n != 12 {
-		t.Fatalf("a runaway foreground keeps %d, want the most, 12", n)
+		t.Fatalf("a runaway game keeps %d, want the most, 12", n)
+	}
+	// The least is a setting.
+	s.ReserveMinProcessors = 4
+	if n, _ = step("", 0, 0, desk); n != 4 {
+		t.Fatalf("reserve_min_processors 4 keeps %d", n)
 	}
 }
 
