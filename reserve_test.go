@@ -169,3 +169,30 @@ func TestWindowAveragesByTimeAndKeepsTheLeastMemory(t *testing.T) {
 		t.Fatalf("the window kept %d looks", len(w.samples))
 	}
 }
+
+// Owl's keeper takes reserved processors from agent processes and never gives them back; the
+// meter does, for a process still on the set of a larger reserve, and for no other.
+func TestOnlyAProcessLeftOnALargerReservesProcessorsIsWidened(t *testing.T) {
+	cases := []struct {
+		name     string
+		mask     uint64
+		reserved int
+		want     bool
+	}{
+		{"held off 12 when the reserve is 4", 0xFFF000, 4, true},
+		{"held off 6 when the reserve is 4", 0xFFFFC0, 4, true},
+		{"already on the reserve's own set", 0xFFFFF0, 4, false},
+		{"still has reserved processors: Owl's to move", 0xFFFFFF, 4, false},
+		{"held off 6 when the reserve is 8: Owl's to move", 0xFFFFC0, 8, false},
+		{"a set it chose for itself", 0x00F000, 4, false},
+		{"one processor in the middle", 0x000100, 4, false},
+	}
+	for _, c := range cases {
+		if got := staleReserveMask(c.mask, c.reserved, 24); got != c.want {
+			t.Errorf("%s (%#x, reserve %d): widened %v, want %v", c.name, c.mask, c.reserved, got, c.want)
+		}
+	}
+	if m := agentMask(4, 24); m != 0xFFFFF0 {
+		t.Fatalf("the agent processors with 4 reserved of 24 are %#x, want 0xFFFFF0", m)
+	}
+}

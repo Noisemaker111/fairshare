@@ -58,7 +58,10 @@ type Settings struct {
 	// launch (one JSON notice on its stdin). QueueHoldMinutes is how long the room stays held
 	// before the next in line is asked; after QueueOffers untaken offers, or QueueMaxHours in the
 	// line, a launch leaves it.
-	QueueNotify []string `json:"queue_notify,omitempty"`
+	// ReleaseProcessors false stops the meter giving agent processes back the processors a
+	// smaller reserve freed (staleReserveMask).
+	ReleaseProcessors *bool    `json:"release_processors,omitempty"`
+	QueueNotify       []string `json:"queue_notify,omitempty"`
 	// QueuePlace is the command the meter runs to pick a machine for a waiting launch that can
 	// run on more than this one: {"entry", "local", "usable"} on its stdin, {"machine": "<name>"}
 	// or {"machine": ""} on its stdout. It is asked at most every QueuePlaceSeconds.
