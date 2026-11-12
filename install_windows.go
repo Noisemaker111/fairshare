@@ -91,6 +91,32 @@ func stopMeter() error {
 	return fmt.Errorf("the running meter did not stop within 10 s")
 }
 
+// swapIn puts exe.new in exe's place. Windows will not write over a program that is running,
+// and fairshare runs all the time: a pool run that carries a gate holds the installed program
+// for as long as the gate lasts. It does let a running program be renamed, so the old one is
+// moved aside and the new one takes its name; old ones nothing runs any more are removed.
+//
+// Why: on 2026-11-11 an install stopped the meter, could not write over the program a gate was
+// running, and left the PC with no meter until it was started by hand.
+func swapIn(exe string) error {
+	dir, name := filepath.Dir(exe), filepath.Base(exe)
+	if olds, err := filepath.Glob(filepath.Join(dir, name+".*.old")); err == nil {
+		for _, old := range olds {
+			os.Remove(old) // fails while something still runs it, and is tried again next time
+		}
+	}
+	aside := fmt.Sprintf("%s.%d.old", exe, time.Now().UnixNano())
+	if err := os.Rename(exe, aside); err != nil && !os.IsNotExist(err) {
+		os.Remove(exe + ".new")
+		return fmt.Errorf("move the running %s aside: %w", name, err)
+	}
+	if err := os.Rename(exe+".new", exe); err != nil {
+		os.Rename(aside, exe)
+		return fmt.Errorf("put the new %s in place: %w", name, err)
+	}
+	return nil
+}
+
 func copyFile(from, to string) error {
 	in, err := os.Open(from)
 	if err != nil {
@@ -147,17 +173,29 @@ func install(uninstall bool) error {
 	if err != nil {
 		return err
 	}
+	exe := installedExe()
+	fresh := !strings.EqualFold(filepath.Clean(self), filepath.Clean(exe))
+	// The new program is put beside the old one before anything is stopped, so an install that
+	// cannot go ahead leaves the meter running as it was.
+	if fresh {
+		if err := copyFile(self, exe+".new"); err != nil {
+			return fmt.Errorf("copy to %s: %w", exe+".new", err)
+		}
+	}
 	if err := stopMeter(); err != nil {
+		os.Remove(exe + ".new")
 		return err
 	}
-	exe := installedExe()
-	if !strings.EqualFold(filepath.Clean(self), filepath.Clean(exe)) {
-		if err := copyFile(self, exe); err != nil {
-			return fmt.Errorf("copy to %s: %w", exe, err)
+	if fresh {
+		if err := swapIn(exe); err != nil {
+			// The old program is still in place: start the meter again on it.
+			schtasks("/Run", "/TN", meterTask)
+			return err
 		}
 	}
 	// The Linux build, when it was built beside this one: boat-host.sh copies it to each Linux
-	// host from here, so every machine answers with the same program.
+	// host from here, so every machine answers with the same program. Nothing runs it here, so
+	// it is copied over.
 	if linux := filepath.Join(filepath.Dir(self), "fairshare-linux"); !strings.EqualFold(filepath.Dir(self), filepath.Dir(exe)) {
 		if _, err := os.Stat(linux); err == nil {
 			if err := copyFile(linux, filepath.Join(filepath.Dir(exe), "fairshare-linux")); err != nil {

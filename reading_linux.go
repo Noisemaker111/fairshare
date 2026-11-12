@@ -187,6 +187,15 @@ func killTree(cmd *exec.Cmd) {
 	}
 }
 
+// listProcTimes is every process with the processor time it has used (pool.go, watch).
+func listProcTimes() []procTime {
+	var out []procTime
+	for _, p := range snapshot() {
+		out = append(out, procTime{pid: p.pid, parent: p.parent, group: p.group, seconds: p.ticks / ticksPerSecond})
+	}
+	return out
+}
+
 // tellYield has nobody to tell on Linux: no keeper holds agent work there.
 func tellYield(Settings, time.Time) error {
 	return errors.New("nothing holds agent work back on Linux")

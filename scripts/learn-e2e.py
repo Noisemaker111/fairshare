@@ -206,8 +206,10 @@ try:
               got and got["cores"] >= 0.5 and got["minutes"] >= 0.3, got or learned())
         code, out, err = fs("room", "--repo", "demo", "--json")
         v = json.loads(out) if out.startswith("{") else {}
-        check("so a new thread of that repo counts as what its threads were measured using", code == 0 and v.get("sized", {}).get("from") == "demo threads here"
-              and v["cpu"]["need"] >= 0.5 and "demo threads here were measured at" in v.get("reason", ""), out + err)
+        # Whether there is room for it is the machine's own load at this moment, and a host under
+        # real work says no (exit 1): what is checked is what the thread counts as.
+        check("so a new thread of that repo counts as what its threads were measured using", code in (0, 1) and v.get("sized", {}).get("from") == "demo threads here"
+              and v["cpu"]["need"] >= 0.5 and "demo threads here were measured at" in v.get("reason", "").lower(), out + err)
 
     # What the run that held memory was learned as: three numbers, not one. It held its most for a
     # tenth of its time, so a minute of it holds far less on average than its most.

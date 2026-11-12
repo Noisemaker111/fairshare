@@ -257,11 +257,17 @@ fairshare pool run --repo appforgutters --commit <sha> -- bash -c "bun install &
   script sent with every call). `--placed <file>` writes where it went before it runs, for a
   caller that has to fetch what the run left there. `--elsewhere` is for a caller that can run
   the command here itself: when this machine has the most room nothing is run and the exit is 70.
-  `--quiet N` and `--most N` give a run up when it has printed nothing for N minutes or has run
-  for N minutes: the machine that runs it keeps the time, ends it and everything it started, and
-  says why (exit 69), so a run nobody is listening to any more still ends; the placing machine
-  waits 90 seconds longer for the case where nothing comes back at all. Why: on 2026-11-11 a
-  landing gate on a starved boat host ran 38.9 minutes and ended with no verdict.
+  `--quiet N` and `--most N` give a run up when no verdict is coming: for N minutes it has printed
+  nothing and done no work, or it has run for N minutes. The machine that runs it keeps the time,
+  ends it and everything it started, and says why (exit 69), so a run nobody is listening to any
+  more still ends; the placing machine waits 90 seconds longer for the case where nothing comes
+  back at all. Work is processor time: the run and everything it started using at least
+  `run_working_processors`. A run that is silent and working is left alone, and its machine says
+  so every third of N ("has printed nothing for 4 minutes and is working: 6.1 processors"), which
+  is also what the placing machine hears. Why: on 2026-11-11 a landing gate on a starved boat
+  host ran 38.9 minutes and ended with no verdict; and the first rule for it, silence alone,
+  ended three jgengine gates that same evening while they were working, because
+  `verify:fast --landing` prints nothing for about ten minutes.
   With `--commit` it runs in a fresh checkout of exactly that commit, which is removed after; the
   folder's own checkout is not touched. On a member with a `busy_dir` it leaves its process id
   there while it runs, so the machine's idle watch does not put it to sleep under the run.
@@ -278,6 +284,7 @@ The pool is `pool.json` in the home of the machine that places work. A member:
 | `hours`, `keep_hours` | prints its plan-hours left (a number, `{"left": n}`, or `{"left": n, "keep": k, "why": "..."}`); it is woken only while more are left than are kept |
 | `can` | what it can do beyond its OS, for `--needs` |
 | `work`, `repos` | the folder that holds its repos, and folders for repos kept somewhere else |
+| `folders`, `listed` | the folders under `work` as the machine listed them when it joined. A sleeping machine cannot say what it has, so one that listed its folders is not woken for a repo that was not among them; join it again after adding a repo |
 | `busy_dir` | a folder its idle watch reads for running work |
 | `extra` | handed back with a placement, for the caller (a T3 environment id, a project id per repo), and what `--where` matches |
 
@@ -327,6 +334,7 @@ read on every call. None of them is a count of threads.
 | `learn_recent_minutes` | 30 | the same for a running piece of work's own minutes: what it did lately says most about what it does next |
 | `learn_margin` | 1 | how much of the open work's swing, taken together, is kept free; 0 keeps none |
 | `learn_mem_margin` | 2 | the same for memory, and more: work short of processors runs slower, work short of memory is ended. 0 keeps only how far one piece reaches |
+| `run_working_processors` | 0.05 | how much processor time a run and everything it started must use to count as working while it prints nothing (`pool run --quiet`). 0 counts every run as working |
 | `reserve_min_processors` | 2 | the least kept for the user |
 | `reserve_max_share` | 0.5 | the most, as a share of the machine |
 | `reserve_headroom_full_screen` | 2 | room over what a running game's own processes used (`reserve_headroom` is no longer used) |

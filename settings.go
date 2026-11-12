@@ -111,6 +111,11 @@ type Settings struct {
 	// LearnMemMargin is the same for memory. It is more than LearnMargin because the two do not
 	// fail alike: work short of processors runs slower, work short of memory is ended.
 	LearnMemMargin float64 `json:"learn_mem_margin"`
+
+	// RunWorkingProcessors is how much processor time a run and everything it started must be
+	// using for it to count as working while it prints nothing (pool run --quiet). 0 counts
+	// every run as working, so silence never ends one.
+	RunWorkingProcessors float64 `json:"run_working_processors"`
 }
 
 func (s Settings) halfLife() time.Duration {
@@ -157,6 +162,8 @@ func defaultSettings() Settings {
 		LearnRecentMinutes: 30,
 		LearnMargin:        1,
 		LearnMemMargin:     2,
+
+		RunWorkingProcessors: 0.05,
 	}
 }
 
@@ -231,6 +238,9 @@ func (s Settings) check() error {
 	}
 	if s.LearnMemMargin < 0 {
 		return fmt.Errorf("learn_mem_margin is %v; it cannot be negative", s.LearnMemMargin)
+	}
+	if s.RunWorkingProcessors < 0 {
+		return fmt.Errorf("run_working_processors is %v; it cannot be negative", s.RunWorkingProcessors)
 	}
 	if s.DiskReserveGB < 0 || s.ThreadDiskGB < 0 {
 		return fmt.Errorf("disk_reserve_gb and thread_disk_gb cannot be negative")
