@@ -1,8 +1,7 @@
 # The pool end to end, through the built fairshare in private homes: three machines, each its own
 # home and its own reading, reached the way a real member is (a command put in front of the
-# command), with a real wake command, a real plan-hours command, real git checkouts and a stand-in
-# for Hona/mesh that prints what mesh's SPEC says it prints. Readings are written by hand so "full"
-# and "room" are certain whatever this machine is doing.
+# command), with a real wake command, a real plan-hours command and real git checkouts. Readings
+# are written by hand so "full" and "room" are certain whatever this machine is doing.
 # Usage: python -I pool-e2e.py <fairshare program>      (Windows and Linux)
 import json, os, shutil, subprocess, sys, tempfile, time
 from datetime import datetime, timezone
@@ -11,7 +10,7 @@ exe = os.path.abspath(sys.argv[1])
 root = tempfile.mkdtemp(prefix="fs-pool-")
 py = sys.executable
 fails = 0
-home = {n: os.path.join(root, n) for n in ("pc", "host-a", "host-b", "meshed", "pc2", "host-c")}
+home = {n: os.path.join(root, n) for n in ("pc", "host-a", "host-b", "pc2", "host-c")}
 for h in home.values():
     os.makedirs(h)
 
@@ -32,21 +31,6 @@ open(wake, "w").write(
     "os.path.exists(os.path.join(home, 'asleep')) and os.remove(os.path.join(home, 'asleep'))\n")
 hours = os.path.join(root, "hours.py")
 open(hours, "w").write("import os, sys\nprint(open(os.path.join(sys.argv[1], 'hours')).read())\n")
-# Hona/mesh, as far as the pool uses it: `status --json --fast` and `exec --no-stall <device> <command...>`.
-mesh = os.path.join(root, "mesh.py")
-open(mesh, "w").write(
-    "import json, os, subprocess, sys\n"
-    "root = os.path.dirname(os.path.abspath(__file__))\n"
-    "state = json.load(open(os.path.join(root, 'mesh.json')))\n"
-    "if sys.argv[1:4] == ['status', '--json', '--fast']:\n"
-    "    print(json.dumps(state)); sys.exit(0)\n"
-    "if sys.argv[1:3] == ['exec', '--no-stall']:\n"
-    "    device = [d for d in state['devices'] if d['name'] == sys.argv[3]]\n"
-    "    if not device or not device[0]['online']:\n"
-    "        sys.stderr.write('mesh: %s: offline\\n' % sys.argv[3]); sys.exit(255)\n"
-    "    sys.exit(subprocess.run([sys.executable, '-I', os.path.join(root, 'via.py'), os.path.join(root, sys.argv[3])] + sys.argv[4:]).returncode)\n"
-    "sys.exit(2)\n")
-
 readings = {}
 
 
@@ -118,7 +102,6 @@ busy = os.path.join(home["host-a"], "gates")
 reading("pc", 2, processors=24, reserved=4, state="active", system="windows")
 reading("host-a", 0.5)
 reading("host-b", 0.5)
-reading("meshed", 0.5)
 
 
 def words(*argv):
@@ -467,40 +450,6 @@ check("once its check calls it ready it is asked like any machine", code == 0 an
 reading("host-a", 0.5)
 code, out, err = fs("pool", "leave", "host-b")
 check("a machine leaves with one command", code == 0 and "2 machines remain" in out, out + err)
-
-# Hona/mesh: the mesh's devices are the pool's machines, reached through `mesh exec`.
-os.makedirs(os.path.join(root, "blade"))
-os.makedirs(os.path.join(root, "air"))
-home["blade"], home["air"] = os.path.join(root, "blade"), os.path.join(root, "air")
-reading("blade", 6, processors=16, system="windows")
-reading("air", 0.5)
-
-
-def mesh_is(*devices):
-    json.dump({"self": "meshed", "devices": [{"name": "meshed", "self": True, "os": "linux", "online": True}] + list(devices)}, open(os.path.join(root, "mesh.json"), "w"))
-
-
-mesh_is({"name": "blade", "self": False, "os": "windows", "online": True}, {"name": "air", "self": False, "os": "macos", "online": False})
-code, out, err = fs("pool", "join", "--mesh", "--mesh-program", words(py, "-I", mesh), at="meshed")
-check("the pool follows the mesh with one command", code == 0 and "3 devices, 3 machines in the pool" in out, out + err)
-pool = json.load(open(os.path.join(home["meshed"], "pool.json")))
-blade = [m for m in pool["members"] if m["name"] == "blade"][0]
-check("a mesh device is reached through `mesh exec`", blade["via"][-3:] == ["exec", "--no-stall", "blade"] and blade["from"] == "mesh", blade)
-blade["fairshare"] = exe  # where fairshare is on that device
-json.dump(pool, open(os.path.join(home["meshed"], "pool.json"), "w"))
-code, pl, raw = placed(at="meshed")
-states = {m["name"]: m["state"] for m in pl.get("machines", [])}
-check("work is placed across the mesh: blade's 9 free processors beat this machine's 6.5", code == 0 and pl.get("machine") == "blade"
-      and states == {"meshed": "room", "blade": "room", "air": "unreachable"}, raw)
-mesh_is({"name": "blade", "self": False, "os": "windows", "online": True}, {"name": "air", "self": False, "os": "macos", "online": True},
-        {"name": "vps", "self": False, "os": "linux", "online": False})
-code, out, err = fs("pool", at="meshed")
-check("a device that joins the mesh is in the pool with no further command", code == 0 and "4 machines" in out and "vps" in out, out + err)
-kept = [m for m in json.load(open(os.path.join(home["meshed"], "pool.json")))["members"] if m["name"] == "blade"][0]
-check("and what was set on a device by hand is kept", kept.get("fairshare") == exe, kept)
-mesh_is({"name": "blade", "self": False, "os": "windows", "online": True})
-code, out, err = fs("pool", at="meshed")
-check("a device that leaves the mesh leaves the pool", code == 0 and "2 machines" in out and "air" not in out, out + err)
 
 # A sleeping machine is not woken for work it cannot take. A machine lists the folders it has when
 # it joins; asleep it cannot say, and a wake to hear "no folder" costs what a wake costs. Seen

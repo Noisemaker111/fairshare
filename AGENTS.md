@@ -27,7 +27,7 @@ out is refused.
 The pool is checked end to end by `python -I scripts/pool-e2e.py fairshare.exe` (or
 `fairshare-linux` on Linux): three machines in private homes, each reached through a command put
 in front of the command as a real member is, with a real wake command, a real plan-hours command,
-real git checkouts, and a stand-in for the `mesh` program that prints what mesh prints. On Linux a
+and real git checkouts. On Linux a
 hand-written reading comes from `FAIRSHARE_READING=<file>`, held to the same age limit as the
 meter's; with it set no meter is started.
 
