@@ -115,8 +115,18 @@ old counts; `fairshare install` puts it back.
   the pool compares; a rule about one machine's room goes in `room.go`, never in `pool.go`.
 - Everything sent to a member is one word of hex (`pool here <word>`): boat, SSH and mesh each
   split and quote a command differently, and a member is never a different code path per carrier.
-- A machine that costs plan-hours is woken only when no awake machine has room, and never when
-  its hours cannot be read.
+- A machine that costs plan-hours is woken only when no awake machine has room, never when its
+  hours cannot be read, and never for work it is known not to have the folder for (`lacks`: it
+  lists its folders when it joins).
+- Silence is not being stuck. A run is given up for being quiet only when it also does no work
+  (`watch`, `run_working_processors`). The first rule was silence alone, and on 2026-11-11 it
+  ended three working jgengine gates.
+- Anything that can end, refuse or delay other threads' work (a limit, a wake rule, a placement
+  rule) is first run against that real work with the rule only reporting, or switched on for
+  your own run alone, and is turned on for everyone only after it passed there. A command made
+  up to be stuck proves the rule fires; it does not prove the rule spares what works. Jon,
+  2026-11-11, after the silence limit: "dont make decisions that can back fire, you need to act
+  like this repo is yours".
 - No caller names a machine. What a caller knows about where work must go is what the work needs
   (`--needs`), what the machine must hold (`--where`, `--folder`), never a member's name; what a
   caller needs back about the machine picked is in that member's `extra`. This machine is `pc`

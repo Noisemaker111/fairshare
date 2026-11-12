@@ -82,6 +82,12 @@ type member struct {
 	// folder where it is somewhere else.
 	Work  string            `json:"work,omitempty"`
 	Repos map[string]string `json:"repos,omitempty"`
+	// Folders are the folders under Work as the machine listed them when it joined, and Listed
+	// says it did. A sleeping machine cannot say whether it has a repo's folder, and waking one to
+	// hear that it has not costs what a wake costs: on 2026-11-11 a jgengine gate woke a host
+	// that has no jgengine.
+	Folders []string `json:"folders,omitempty"`
+	Listed  bool     `json:"listed,omitempty"`
 	// BusyDir is a folder the machine's own idle watch reads: a run leaves its process id there
 	// while it runs, so the machine is not put to sleep under it.
 	BusyDir string `json:"busy_dir,omitempty"`
@@ -291,8 +297,8 @@ type errand struct {
 	// Mark is left in the machine's fairshare home while Argv runs, so its meter measures the
 	// run as this run and its room rule counts it for as long as it runs.
 	Mark *runMark `json:"mark,omitempty"`
-	// Quiet and Most are minutes: Argv is given up when it has printed nothing for Quiet, or has
-	// run for Most. The machine that runs it keeps the time, so a run nobody is listening to any
+	// Quiet and Most are minutes: Argv is given up when for Quiet it has printed nothing and done
+	// no work, or has run for Most. The machine that runs it keeps the time, so a run nobody is listening to any
 	// more (the carrier dropped) still ends.
 	Quiet float64 `json:"quiet,omitempty"`
 	Most  float64 `json:"most,omitempty"`
@@ -319,19 +325,81 @@ func howLong(d time.Duration) string {
 	return "a minute"
 }
 
+// procTime is one process on this machine: who started it, the group it runs in (0 where there
+// are none) and the processor seconds it has used so far.
+type procTime struct {
+	pid, parent, group uint32
+	seconds            float64
+}
+
+// procTimes lists every process on this machine. A test replaces it.
+var procTimes = listProcTimes
+
+// workDone counts the processor time a command and everything it started use, from one look to
+// the next. A process is the command's when its parent is, or when it runs in the command's group:
+// a process whose parent has ended keeps its group, and its parent's number stays the command's
+// here for as long as the run lasts.
+type workDone struct {
+	mine map[uint32]bool
+	seen map[uint32]float64
+}
+
+// since is the processor seconds used since the last look, 0 at the first; false when this
+// machine cannot be asked.
+func (w *workDone) since(root uint32) (float64, bool) {
+	all := procTimes()
+	if len(all) == 0 {
+		return 0, false
+	}
+	if w.mine == nil {
+		w.mine = map[uint32]bool{root: true}
+	}
+	for grew := true; grew; { // a child can be listed before its parent
+		grew = false
+		for _, p := range all {
+			if p.pid != 0 && !w.mine[p.pid] && (w.mine[p.parent] || (p.group != 0 && p.group == root)) {
+				w.mine[p.pid], grew = true, true
+			}
+		}
+	}
+	now, used := map[uint32]float64{}, 0.0
+	for _, p := range all {
+		if !w.mine[p.pid] {
+			continue
+		}
+		now[p.pid] = p.seconds
+		if before, known := w.seen[p.pid]; known {
+			used += max(0, p.seconds-before)
+		} else if w.seen != nil {
+			used += p.seconds // begun since the last look
+		}
+	}
+	w.seen = now
+	return used, true
+}
+
 // watch runs a command, passing on what it prints, and gives it up (it and everything it started
-// are ended) when it has printed nothing for quiet or has run for most; zero is no limit. It
-// returns the command's exit, and why it was given up when it was.
+// are ended) when no verdict is coming: it has run for most, or for quiet it has printed nothing
+// and done no work. Zero is no limit. It returns the command's exit, and why it was given up
+// when it was.
+//
+// Work is processor time: the command and everything it started using at least working
+// processors, looked at a few times within quiet. working below zero means this side cannot see
+// the run's work (it only carries the run to another machine), and then what is printed is all
+// there is to go by; so a machine whose run is silent and working says so (who is its name), and
+// that line is what the carrying side hears.
 //
 // Why: on 2026-11-11 a landing gate sent to a boat host ran 38.9 minutes and ended with no
 // verdict. Nothing bounded it: not the host, where it had no room, and not the PC, which waited
-// on a stream that had nothing more to say.
-func watch(cmd *exec.Cmd, quiet, most time.Duration) (int, string) {
+// on a stream that had nothing more to say. The first rule for it was silence alone, ten minutes,
+// and that same evening it ended three jgengine gates that were working: `verify:fast --landing`
+// prints nothing for about ten minutes while every processor is busy. Silence is not being stuck.
+func watch(cmd *exec.Cmd, quiet, most time.Duration, working float64, who string) (int, string) {
 	if quiet <= 0 && most <= 0 {
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		return exitCode(cmd.Run()), ""
 	}
-	var last atomic.Int64
+	var last atomic.Int64 // when it last printed
 	last.Store(time.Now().UnixNano())
 	cmd.Stdout, cmd.Stderr = touched{os.Stdout, &last}, touched{os.Stderr, &last}
 	cmd.WaitDelay = 5 * time.Second // a child that outlived the kill does not hold the answer back
@@ -344,15 +412,39 @@ func watch(cmd *exec.Cmd, quiet, most time.Duration) (int, string) {
 	go func() { done <- cmd.Wait() }()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	var work workDone
+	look := min(time.Minute, quiet/3) // how often its work is looked at
+	looked, worked, said, blind := start, start, start, false
 	for {
 		select {
 		case err := <-done:
 			return exitCode(err), ""
 		case now := <-tick.C:
+			printed := time.Unix(0, last.Load())
+			if quiet > 0 && working >= 0 && !blind && now.Sub(looked) >= look {
+				used, ok := work.since(uint32(cmd.Process.Pid))
+				over := now.Sub(looked)
+				looked = now
+				switch {
+				case !ok:
+					blind = true
+					fmt.Fprintf(os.Stderr, "degraded: %s cannot see what the run's processes use, so silence does not end the run there; only the limit on its whole time does.\n", who)
+				case used >= working*over.Seconds():
+					worked = now
+					if now.Sub(printed) >= quiet/3 && now.Sub(said) >= quiet/3 {
+						said = now
+						fmt.Fprintf(os.Stderr, "fairshare: the run on %s has printed nothing for %s and is working: %.1f processors over the last %s.\n",
+							who, howLong(now.Sub(printed)), used/over.Seconds(), howLong(over))
+					}
+				}
+			}
 			why := ""
 			switch {
-			case quiet > 0 && now.Sub(time.Unix(0, last.Load())) >= quiet:
+			case quiet > 0 && !blind && now.Sub(printed) >= quiet && now.Sub(worked) >= quiet:
 				why = fmt.Sprintf("it printed nothing for %s", howLong(quiet))
+				if working >= 0 {
+					why = fmt.Sprintf("for %s it printed nothing and did no work (its processes used under %.2f of a processor)", howLong(quiet), working)
+				}
 			case most > 0 && now.Sub(start) >= most:
 				why = fmt.Sprintf("it ran for %s, the most it is given", howLong(most))
 			}
@@ -516,6 +608,16 @@ func (w work) roomArgs(m member, take bool, seen *Sizing) []string {
 		args = append(args, "--take")
 	}
 	return args
+}
+
+// lacks says the member is known not to have the folder the work runs in: it listed its folders
+// when it joined and the repo's was not among them. A machine that never listed them is not
+// known to lack anything.
+func (m member) lacks(w work) bool {
+	if !w.Folder || w.Repo == "" || !m.Listed || m.Repos[w.Repo] != "" {
+		return false
+	}
+	return !slices.ContainsFunc(m.Folders, func(f string) bool { return strings.EqualFold(f, w.Repo) })
 }
 
 // open says whether the work may go to the member at all, before anything is measured.
@@ -916,6 +1018,11 @@ func place(p poolFile, w work, take bool, wake func(member) error) placement {
 	}
 	for i, m := range p.Members {
 		if answers[i].State != "asleep" {
+			continue
+		}
+		if m.lacks(w) {
+			// An awake machine says this itself; a sleeping one is not woken to say it.
+			answers[i].State, answers[i].Why = "closed", fmt.Sprintf("asleep, and it had no folder for %s when it last joined", w.Repo)
 			continue
 		}
 		if len(m.Hours) > 0 {
@@ -1369,8 +1476,8 @@ const poolUsage = `fairshare pool: every machine that joined, as one place to ru
       --placed <file>                write where it went (the placement, as JSON) before it runs
       --elsewhere                    for a caller that can run it here itself: when this machine has the most room,
                                      run nothing and exit 70
-      --quiet N --most N             give the run up (exit 69, and why) when it has printed nothing for N minutes,
-                                     or has run for N minutes; the machine that runs it ends it
+      --quiet N --most N             give the run up (exit 69, and why) when for N minutes it has printed nothing and
+                                     done no work, or has run for N minutes; the machine that runs it ends it
 `
 
 func cmdPool(args []string) int {
@@ -1477,6 +1584,23 @@ func cmdPool(args []string) int {
 			return fail(errors.New("pool here <errand>"))
 		}
 		return poolHere(args[1])
+	case "folders":
+		// Asked of a machine when it joins: the folders under the one that holds its repos.
+		if len(args) < 2 {
+			return fail(errors.New("pool folders <folder>"))
+		}
+		entries, err := os.ReadDir(homePath(args[1]))
+		if err != nil {
+			return fail(err)
+		}
+		names := []string{}
+		for _, e := range entries {
+			if st, err := os.Stat(filepath.Join(homePath(args[1]), e.Name())); err == nil && st.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		printJSON(map[string]any{"folders": names})
+		return 0
 	case "help", "-h", "--help":
 		fmt.Print(poolUsage)
 		return 0
@@ -1554,6 +1678,16 @@ func poolJoin(args []string) error {
 		return fmt.Errorf("%s did not answer, so it did not join: %w%s", cmpOr(m.Name, "this machine"), err, why)
 	}
 	m.OS, m.Processors = r.OS, r.Processors
+	if m.Work != "" {
+		// What it has, said while it is awake to say it. A machine on a build that cannot list
+		// its folders stays unlisted, and is asked as before.
+		var got struct {
+			Folders *[]string `json:"folders"`
+		}
+		if out, _, err := send(p, m, errand{Args: []string{"pool", "folders", m.Work}}); err == nil && json.Unmarshal(jsonPart(out), &got) == nil && got.Folders != nil {
+			m.Folders, m.Listed = *got.Folders, true
+		}
+	}
 	if m.Name == "" {
 		m.Name, _, _ = strings.Cut(strings.ToLower(r.Machine), ".")
 	}
@@ -1725,7 +1859,7 @@ func poolRun(args []string) int {
 	commit := fs.String("commit", "", "run it in a checkout of exactly this commit of --repo")
 	wait := fs.Float64("wait", 0, "minutes to keep asking while the pool is full")
 	as := fs.String("as", "", "what the run is called, when its words are a wrapper's")
-	quiet := fs.Float64("quiet", 0, "give the run up when it has printed nothing for this many minutes")
+	quiet := fs.Float64("quiet", 0, "give the run up when for this many minutes it has printed nothing and done no work")
 	most := fs.Float64("most", 0, "give the run up when it has run for this many minutes")
 	placedFile := fs.String("placed", "", "write where it went, as JSON, before it runs")
 	elsewhere := fs.Bool("elsewhere", false, "when this machine has the most room, run nothing and exit 70")
@@ -1801,7 +1935,8 @@ func poolRun(args []string) int {
 		}
 		return time.Duration(minutes*float64(time.Minute)) + 90*time.Second
 	}
-	code, gaveUp := watch(cmd, grace(*quiet), grace(*most))
+	// This side only carries the run: what its own carrier uses says nothing about the run.
+	code, gaveUp := watch(cmd, grace(*quiet), grace(*most), -1, m.Name)
 	seconds := round2(time.Since(start).Seconds())
 	if gaveUp != "" {
 		// This is the backstop for a machine that did not give the run up itself (the link to it
@@ -1903,7 +2038,8 @@ func poolHere(word string) int {
 	}
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
-	code, gaveUp := watch(cmd, minutes(e.Quiet), minutes(e.Most))
+	settings, _ := loadSettings() // unreadable settings are the defaults
+	code, gaveUp := watch(cmd, minutes(e.Quiet), minutes(e.Most), settings.RunWorkingProcessors, host)
 	if gaveUp != "" {
 		fmt.Fprintf(os.Stderr, "degraded: %s gave the run up: %s. It and everything it started were ended.\n", host, gaveUp)
 	}

@@ -297,6 +297,20 @@ func hideWindow(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{HideWind
 // ownGroup has nothing to set on Windows: killTree follows the process tree.
 func ownGroup(*exec.Cmd) {}
 
+// listProcTimes is every process with the processor time it has used (pool.go, watch). Windows
+// has no process groups; a process keeps its parent's number after the parent has ended.
+func listProcTimes() []procTime {
+	all, err := processes()
+	if err != nil {
+		return nil
+	}
+	out := make([]procTime, 0, len(all))
+	for _, p := range all {
+		out = append(out, procTime{pid: p.pid, parent: p.parent, seconds: p.cpu})
+	}
+	return out
+}
+
 // killTree ends a command and everything it started.
 func killTree(cmd *exec.Cmd) {
 	if cmd.Process == nil {

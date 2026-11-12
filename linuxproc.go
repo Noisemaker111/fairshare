@@ -205,7 +205,10 @@ func linuxReading(f linuxFiles, processors int) (Reading, error) {
 // pidStat is one process as /proc/<pid>/stat describes it.
 type pidStat struct {
 	pid, parent uint32
-	name        string
+	// group is its process group: a command started in its own group keeps everything it starts
+	// in it, whoever their parents are by then.
+	group uint32
+	name  string
 	// ticks is the processor time of the process and of every child it has waited for, so the
 	// time of a compiler job that started and ended between two looks is still counted, under
 	// the process that started it.
@@ -228,13 +231,16 @@ func parsePidStat(text string) (pidStat, bool) {
 		return p, false
 	}
 	f := strings.Fields(text[shut+1:])
-	// After the name: state(0) ppid(1) ... utime(11) stime(12) cutime(13) cstime(14) ... starttime(19) vsize(20) rss(21)
+	// After the name: state(0) ppid(1) pgrp(2) ... utime(11) stime(12) cutime(13) cstime(14) ... starttime(19) vsize(20) rss(21)
 	if len(f) < 22 {
 		return p, false
 	}
 	parent, err := strconv.ParseUint(f[1], 10, 32)
 	if err != nil {
 		return p, false
+	}
+	if group, err := strconv.ParseUint(f[2], 10, 32); err == nil {
+		p.group = uint32(group)
 	}
 	for _, i := range []int{11, 12, 13, 14} {
 		v, err := strconv.ParseFloat(f[i], 64)

@@ -11,7 +11,7 @@ exe = os.path.abspath(sys.argv[1])
 root = tempfile.mkdtemp(prefix="fs-pool-")
 py = sys.executable
 fails = 0
-home = {n: os.path.join(root, n) for n in ("pc", "host-a", "host-b", "meshed")}
+home = {n: os.path.join(root, n) for n in ("pc", "host-a", "host-b", "meshed", "pc2", "host-c")}
 for h in home.values():
     os.makedirs(h)
 
@@ -340,8 +340,18 @@ pidf = os.path.join(root, "run.pid")
 silent = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); print('started', flush=True); time.sleep(120)"
 began = time.time()
 code, out, err = fs("pool", "run", "--repo", "demo", "--quiet", "0.05", "--", py, "-c", silent, pidf)
-check("a run that goes silent is given up by the machine it runs on, which says why, and is ended there", code == 69 and out == "started"
-      and "gave the run up: it printed nothing for 3 seconds" in err and time.time() - began < 40 and not alive(int(open(pidf).read())), out + err)
+check("a run that goes silent and does no work is given up by the machine it runs on, which says why, and is ended there", code == 69 and out == "started"
+      and "gave the run up: for 3 seconds it printed nothing and did no work" in err and time.time() - began < 40 and not alive(int(open(pidf).read())), out + err)
+# Silence is not being stuck: a run that prints nothing while something it started works is left to
+# finish, and the machine says it is working. Three jgengine landing gates were ended at ten silent
+# minutes on 2026-11-11 while every processor was busy with them.
+burn = "import time; t = time.time()\nwhile time.time() - t < 12: pass"
+working = ("import subprocess, sys\nprint('started', flush=True)\n"
+           "subprocess.run([sys.executable, '-c', sys.argv[1]])\nprint('finished', flush=True)")
+began = time.time()
+code, out, err = fs("pool", "run", "--repo", "demo", "--quiet", "0.05", "--", py, "-c", working, burn)
+check("a run that prints nothing while its child works is not given up: it finishes, and the machine says it is working",
+      code == 0 and out.split() == ["started", "finished"] and "gave the run up" not in err and "is working" in err and time.time() - began >= 11, out + err)
 chatty = "import time\nwhile True:\n    print('.', flush=True)\n    time.sleep(0.5)"
 began = time.time()
 code, out, err = fs("pool", "run", "--repo", "demo", "--most", "0.05", "--", py, "-c", chatty)
@@ -491,6 +501,33 @@ check("and what was set on a device by hand is kept", kept.get("fairshare") == e
 mesh_is({"name": "blade", "self": False, "os": "windows", "online": True})
 code, out, err = fs("pool", at="meshed")
 check("a device that leaves the mesh leaves the pool", code == 0 and "2 machines" in out and "air" not in out, out + err)
+
+# A sleeping machine is not woken for work it cannot take. A machine lists the folders it has when
+# it joins; asleep it cannot say, and a wake to hear "no folder" costs what a wake costs. Seen
+# 2026-11-11: a jgengine gate woke a host that has no jgengine.
+reading("pc2", 23.9, processors=24, reserved=4, system="windows")
+reading("host-c", 0.5)
+c_work = os.path.join(root, "host-c-work")
+os.makedirs(os.path.join(c_work, "other"))
+join_c = ("pool", "join", "--name", "host-c", "--via", words(py, "-I", via, home["host-c"]), "--fairshare", exe, "--work", c_work,
+          "--wake", words(py, "-I", wake, home["host-c"]))
+fs("pool", "join", at="pc2")
+code, out, err = fs(*join_c, at="pc2")
+member_c = [m for m in json.load(open(os.path.join(home["pc2"], "pool.json")))["members"] if m["name"] == "host-c"][0]
+check("a machine says which folders it has when it joins", code == 0 and member_c.get("listed") is True and member_c.get("folders") == ["other"], out + err + str(member_c))
+open(os.path.join(home["host-c"], "asleep"), "w").close()
+code, pl, raw = placed("--repo", "demo", "--folder", at="pc2")
+state_c = {m["name"]: m for m in pl.get("machines", [])}.get("host-c", {})
+check("asleep and without the repo's folder, it is not woken", code == 1 and not lines(os.path.join(home["host-c"], "wakes"))
+      and state_c.get("state") == "closed" and "no folder for demo when it last joined" in state_c.get("why", ""), raw)
+code, pl, raw = placed("--repo", "other", "--folder", at="pc2")
+check("asleep and with the repo's folder, it is woken and takes the work", code == 0 and pl.get("machine") == "host-c" and pl.get("woke") is True
+      and len(lines(os.path.join(home["host-c"], "wakes"))) == 1, raw)
+os.makedirs(os.path.join(c_work, "demo"))
+fs(*join_c, at="pc2")
+open(os.path.join(home["host-c"], "asleep"), "w").close()
+code, pl, raw = placed("--repo", "demo", "--folder", at="pc2")
+check("once it has joined again with the folder, it is woken for that repo too", code == 0 and pl.get("machine") == "host-c" and pl.get("woke") is True, raw)
 
 shutil.rmtree(root, ignore_errors=True)
 print("failures:", fails)

@@ -445,3 +445,54 @@ func TestAGivenUpRunSaysHowLongInWordsThatRead(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkIsWhatACommandAndEverythingItStartedUse(t *testing.T) {
+	saved := procTimes
+	defer func() { procTimes = saved }()
+	var now []procTime
+	procTimes = func() []procTime { return now }
+	var w workDone
+
+	// The command (10), its child (11) listed before it, a grandchild whose parent has ended but
+	// which runs in the command's group (12), and a stranger (99).
+	now = []procTime{{pid: 11, parent: 10, seconds: 5}, {pid: 10, parent: 1, seconds: 1}, {pid: 12, parent: 1, group: 10, seconds: 3}, {pid: 99, parent: 1, seconds: 500}}
+	if used, ok := w.since(10); !ok || used != 0 {
+		t.Fatalf("the first look counts nothing: %v %v", used, ok)
+	}
+	now = []procTime{{pid: 11, parent: 10, seconds: 7}, {pid: 10, parent: 1, seconds: 1}, {pid: 12, parent: 1, group: 10, seconds: 4.5}, {pid: 99, parent: 1, seconds: 900},
+		{pid: 13, parent: 11, seconds: 0.5}}
+	if used, ok := w.since(10); !ok || !near(used, 2+1.5+0.5) {
+		t.Fatalf("the child, the grandchild in its group and a process begun since are its work, the stranger is not: %v", used)
+	}
+	// The child ended; what it started is still the command's, by the number its parent had.
+	now = []procTime{{pid: 10, parent: 1, seconds: 1}, {pid: 13, parent: 11, seconds: 2.5}, {pid: 99, parent: 1, seconds: 990}}
+	if used, _ := w.since(10); !near(used, 2) {
+		t.Fatalf("a process whose parent ended is still counted: %v", used)
+	}
+	if used, _ := w.since(10); used != 0 {
+		t.Fatalf("nothing used, nothing counted: %v", used)
+	}
+	now = nil
+	if _, ok := w.since(10); ok {
+		t.Fatal("a machine that lists no processes cannot say")
+	}
+}
+
+func TestASleepingMachineIsKnownToLackOnlyWhatItListed(t *testing.T) {
+	folder := work{Repo: "JGEngine", Folder: true}
+	for name, c := range map[string]struct {
+		m    member
+		w    work
+		want bool
+	}{
+		"it listed its folders and the repo is not among them": {member{Listed: true, Folders: []string{"appforgutters"}}, folder, true},
+		"the repo is among them, whatever its case":            {member{Listed: true, Folders: []string{"appforgutters", "jgengine"}}, folder, false},
+		"it never listed them":                                 {member{Folders: nil}, folder, false},
+		"the repo's folder is named for it":                    {member{Listed: true, Repos: map[string]string{"JGEngine": "/srv/jg"}}, folder, false},
+		"work that needs no folder":                            {member{Listed: true}, work{Repo: "JGEngine"}, false},
+	} {
+		if got := c.m.lacks(c.w); got != c.want {
+			t.Errorf("%s: lacks is %v, want %v", name, got, c.want)
+		}
+	}
+}
