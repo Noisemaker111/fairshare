@@ -195,3 +195,50 @@ func TestALookMeasuresThisPC(t *testing.T) {
 		t.Fatal("apps.json written with nothing full screen")
 	}
 }
+
+// An install puts the new program in place while the old one is running from the same path, as
+// it is whenever a pool run carries a gate.
+func TestANewProgramReplacesOneThatIsRunning(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "fairshare.exe")
+	ping, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "PING.EXE"))
+	if err != nil {
+		t.Skip("no ping.exe to run:", err)
+	}
+	if err := os.WriteFile(exe, ping, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	running := exec.Command(exe, "-n", "30", "127.0.0.1")
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { running.Process.Kill(); running.Wait() }()
+	if err := os.WriteFile(exe, []byte("over"), 0o755); err == nil {
+		t.Fatal("Windows let a running program be written over: the case this guards is not the case here")
+	}
+	if err := os.WriteFile(exe+".new", []byte("the new program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := swapIn(exe); err != nil {
+		t.Fatalf("the new program did not go in while the old one ran: %v", err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "the new program" {
+		t.Fatalf("the installed program is %q", got)
+	}
+	if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
+		t.Fatal("the new program was left beside it as well")
+	}
+	olds, _ := filepath.Glob(filepath.Join(dir, "fairshare.exe.*.old"))
+	if len(olds) != 1 {
+		t.Fatalf("the running program was not kept aside: %v", olds)
+	}
+	running.Process.Kill()
+	running.Wait()
+	os.WriteFile(exe+".new", []byte("the next program"), 0o755)
+	if err := swapIn(exe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(olds[0]); !os.IsNotExist(err) {
+		t.Fatal("an old program nothing runs any more was not removed at the next install")
+	}
+}
