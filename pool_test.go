@@ -437,3 +437,11 @@ func TestThePoolPassesOnWhatTheMachineThatMeasuredMostSays(t *testing.T) {
 		t.Fatal("work without a repo was kept as news")
 	}
 }
+
+func TestAGivenUpRunSaysHowLongInWordsThatRead(t *testing.T) {
+	for d, want := range map[time.Duration]string{3 * time.Second: "3 seconds", time.Minute: "a minute", 10 * time.Minute: "10 minutes"} {
+		if got := howLong(d); got != want {
+			t.Errorf("%v reads %q, want %q", d, got, want)
+		}
+	}
+}

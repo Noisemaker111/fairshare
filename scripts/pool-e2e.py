@@ -143,6 +143,9 @@ open(os.path.join(home["host-b"], "hours"), "w").write("40")
 code, out, err = fs("pool")
 check("the pool is one place: what the awake machines have together, and who sleeps",
       code == 0 and "3 machines, 2 awake" in out and "32 processors, 28 of them for agent work" in out and "Asleep, woken only when the others are full: host-b" in out, out + err)
+asleep_row = [l for l in out.splitlines() if l.split()[:2] == ["host-b", "asleep"]]
+check("a sleeping machine's row says its plan-hours, not what its carrier said when it did not answer",
+      len(asleep_row) == 1 and "40.0 plan-hours left" in asleep_row[0] and "did not answer" not in asleep_row[0] and "degraded" not in out, out)
 check("the processors kept for the person at the PC are not the pool's", any(l.split()[:6] == ["pc", "room", "windows", "24", "4", "20"] for l in out.splitlines()), out)
 check("a sleeping machine's plan-hours are shown", "40.0 plan-hours left" in out, out)
 

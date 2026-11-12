@@ -309,6 +309,16 @@ func (t touched) Write(b []byte) (int, error) {
 	return t.to.Write(b)
 }
 
+// howLong says a length of time as it reads after "for": span's word for about a minute is the
+// bare "minute" of "over the last minute". Seen 2026-11-11, from a real host: "it printed nothing
+// for minute".
+func howLong(d time.Duration) string {
+	if s := span(d.Seconds()); s != "minute" {
+		return s
+	}
+	return "a minute"
+}
+
 // watch runs a command, passing on what it prints, and gives it up (it and everything it started
 // are ended) when it has printed nothing for quiet or has run for most; zero is no limit. It
 // returns the command's exit, and why it was given up when it was.
@@ -342,9 +352,9 @@ func watch(cmd *exec.Cmd, quiet, most time.Duration) (int, string) {
 			why := ""
 			switch {
 			case quiet > 0 && now.Sub(time.Unix(0, last.Load())) >= quiet:
-				why = fmt.Sprintf("it printed nothing for %s", span(quiet.Seconds()))
+				why = fmt.Sprintf("it printed nothing for %s", howLong(quiet))
 			case most > 0 && now.Sub(start) >= most:
-				why = fmt.Sprintf("it ran for %s, the most it is given", span(most.Seconds()))
+				why = fmt.Sprintf("it ran for %s, the most it is given", howLong(most))
 			}
 			if why == "" {
 				continue
@@ -1684,6 +1694,9 @@ func poolStatus(p poolFile, asJSON bool) int {
 			note = "someone is at it"
 		case r.Presence == "away":
 			note = "nobody at it"
+		case r.State == "asleep":
+			// Asleep is a state, not a failure: what its carrier said when asked is not news. Seen
+			// 2026-11-11, on every stopped host's row: "...hen retry. degraded: bx_... gave no exit code".
 		case r.verdict == nil:
 			note = tail(r.Why, 90)
 		}
@@ -1791,7 +1804,11 @@ func poolRun(args []string) int {
 	code, gaveUp := watch(cmd, grace(*quiet), grace(*most))
 	seconds := round2(time.Since(start).Seconds())
 	if gaveUp != "" {
-		fmt.Fprintf(os.Stderr, "degraded: nothing more came back from %s (%s): the run is given up after %.0f s\n", m.Name, gaveUp, seconds)
+		// This is the backstop for a machine that did not give the run up itself (the link to it
+		// broke, or its fairshare is older than the limits): only the carrier here is ended, so it
+		// says that what runs there may go on. Seen 2026-11-11 on a host one build behind.
+		fmt.Fprintf(os.Stderr, "degraded: nothing more came back from %s (%s): the run is given up after %.0f s. Only the way to %s was ended here; what the run started there may still be running.\n",
+			m.Name, gaveUp, seconds, m.Name)
 	}
 	fmt.Fprintf(os.Stderr, "fairshare: %s ran it in %.1f s, exit %d\n", m.Name, seconds, code)
 	appendLine("decisions.jsonl", map[string]any{"at": time.Now().UTC(), "event": "pool run", "label": w.Label, "repo": w.Repo, "what": w.What, "commit": *commit,
